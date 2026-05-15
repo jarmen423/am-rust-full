@@ -1,0 +1,55 @@
+[package]
+name = "am-workspace"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "am_workspace"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "workspace-server"
+path = "src/server/main.rs"
+
+[[bin]]
+name = "workspace-app"
+path = "src/app_main.rs"
+
+[features]
+default = ["server"]
+server = []
+egui = [
+    "dep:egui",
+    "dep:eframe",
+    "dep:ehttp",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:console_error_panic_hook",
+    "dep:parking_lot",
+]
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+git2 = "0.20"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Frontend dependencies (gated behind egui feature)
+egui = { version = "0.30", optional = true }
+eframe = { version = "0.30", default-features = false, features = ["glow", "default_fonts"], optional = true }
+ehttp = { version = "0.5", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+parking_lot = { version = "0.12", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
