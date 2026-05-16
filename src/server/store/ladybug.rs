@@ -1,19 +1,249 @@
 //! LadybugDB graph query functions for Phase 4.
 //!
-//! All functions accept `&Option<Connection>` so that routes can gracefully
-//! fall back to local-only data when LadybugDB is unavailable (file missing,
-//! connection failed, etc.).  Every function returns `Result` with an error
-//! message — the route layer maps `Err` to empty vectors.
+//! Handlers pass `&LadybugDb` when a `.lbug` file is available. Without native
+//! Ladybug (`--no-default-features`, no `ladybug` feature), `LadybugDb` wraps
+//! the internal [`crate::lbug_shim`] whose queries always return empty rows so
+//! routes never panic on missing DLLs.
 //!
-//! **Swapping to the real `lbug` crate:**
-//! Replace `use crate::lbug_shim as lbug;` below with `use lbug;` and delete
-//! the `lbug_shim.rs` module.
+//! With the default `ladybug` feature, this module links the official [`lbug`]
+//! crate and executes real Cypher against an on-disk database opened in
+//! **read-only** mode for safer local inspection of hosted snapshots.
 
-// Replace with `use lbug;` when the real crate is available.
-use crate::lbug_shim as lbug;
+use std::path::PathBuf;
+
 use am_workspace::model::{WorkspaceGraphEdge, WorkspaceGraphNode};
-use lbug::Connection;
 use serde_json::json;
+
+// ── Ladybug runtime handle (native vs shim) ──────────────────────────
+
+/// Handle to an on-disk Ladybug database used by graph routes.
+///
+/// Cloning is cheap: native builds wrap `Arc<lbug::Database>`; shim builds
+/// clone the lightweight stub connection.
+#[cfg(feature = "ladybug")]
+#[derive(Clone)]
+pub struct LadybugDb {
+    /// Resolved filesystem path (for logs / diagnostics).
+    pub path: PathBuf,
+    db: std::sync::Arc<lbug::Database>,
+}
+
+#[cfg(feature = "ladybug")]
+impl std::fmt::Debug for LadybugDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LadybugDb")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(not(feature = "ladybug"))]
+#[derive(Clone, Debug)]
+pub struct LadybugDb {
+    pub path: PathBuf,
+    pub(crate) conn: crate::lbug_shim::Connection,
+}
+
+#[cfg(feature = "ladybug")]
+fn value_as_required_string(v: &lbug::Value) -> Result<String, String> {
+    match v {
+        lbug::Value::Null(_) => Err("unexpected NULL in required column".to_string()),
+        lbug::Value::String(s) => Ok(s.clone()),
+        lbug::Value::Bool(b) => Ok(b.to_string()),
+        lbug::Value::Int64(i) => Ok(i.to_string()),
+        lbug::Value::Int32(i) => Ok(i.to_string()),
+        lbug::Value::Int16(i) => Ok(i.to_string()),
+        lbug::Value::Int8(i) => Ok(i.to_string()),
+        lbug::Value::UInt64(u) => Ok(u.to_string()),
+        lbug::Value::UInt32(u) => Ok(u.to_string()),
+        lbug::Value::UInt16(u) => Ok(u.to_string()),
+        lbug::Value::UInt8(u) => Ok(u.to_string()),
+        lbug::Value::Float(x) => Ok(x.to_string()),
+        lbug::Value::Double(x) => Ok(x.to_string()),
+        other => Ok(other.to_string()),
+    }
+}
+
+#[cfg(feature = "ladybug")]
+fn value_as_optional_string(v: &lbug::Value) -> Option<String> {
+    match v {
+        lbug::Value::Null(_) => None,
+        lbug::Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+#[cfg(feature = "ladybug")]
+fn value_as_required_i64(v: &lbug::Value) -> Result<i64, String> {
+    match v {
+        lbug::Value::Int64(i) => Ok(*i),
+        lbug::Value::Int32(i) => Ok(*i as i64),
+        lbug::Value::Int16(i) => Ok(*i as i64),
+        lbug::Value::Int8(i) => Ok(*i as i64),
+        lbug::Value::UInt64(u) => Ok(*u as i64),
+        lbug::Value::UInt32(u) => Ok(*u as i64),
+        lbug::Value::UInt16(u) => Ok(*u as i64),
+        lbug::Value::UInt8(u) => Ok(*u as i64),
+        other => Err(format!("expected integral count column, got {:?}", other)),
+    }
+}
+
+/// Run a query whose rows are three string columns (typical rel sample rows).
+#[cfg(feature = "ladybug")]
+fn query_rows_3(db: &LadybugDb, sql: &str) -> Result<Vec<(String, String, String)>, String> {
+    let conn = lbug::Connection::new(&db.db).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in conn.query(sql).map_err(|e| e.to_string())? {
+        if row.len() != 3 {
+            return Err(format!("expected 3 columns, got {}", row.len()));
+        }
+        out.push((
+            value_as_required_string(&row[0])?,
+            value_as_required_string(&row[1])?,
+            value_as_required_string(&row[2])?,
+        ));
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "ladybug"))]
+fn query_rows_3(db: &LadybugDb, sql: &str) -> Result<Vec<(String, String, String)>, String> {
+    let mut stmt = db.conn.prepare(sql).map_err(|e| e.to_string())?;
+    stmt.query_map(&[], |row| {
+        Ok((row.get::<String>(0)?, row.get::<String>(1)?, row.get::<String>(2)?))
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "ladybug")]
+fn query_entity_edges(db: &LadybugDb, sql: &str) -> Result<Vec<WorkspaceGraphEdge>, String> {
+    let conn = lbug::Connection::new(&db.db).map_err(|e| e.to_string())?;
+    let mut edges = Vec::new();
+    for row in conn.query(sql).map_err(|e| e.to_string())? {
+        if row.len() != 3 {
+            return Err(format!("expected 3 columns, got {}", row.len()));
+        }
+        let source = value_as_required_string(&row[0])?;
+        let target = value_as_required_string(&row[1])?;
+        let rel_type = value_as_required_string(&row[2])?;
+        let from_id = format!("ladybug-entity:{}", source);
+        let to_id = format!("ladybug-entity:{}", target);
+        edges.push(make_edge(&from_id, &to_id, &rel_type));
+    }
+    Ok(edges)
+}
+
+#[cfg(not(feature = "ladybug"))]
+fn query_entity_edges(db: &LadybugDb, sql: &str) -> Result<Vec<WorkspaceGraphEdge>, String> {
+    let mut stmt = db.conn.prepare(sql).map_err(|e| e.to_string())?;
+    stmt.query_map(&[], |row| {
+        let source: String = row.get(0)?;
+        let target: String = row.get(1)?;
+        let rel_type: String = row.get(2)?;
+        let from_id = format!("ladybug-entity:{}", source);
+        let to_id = format!("ladybug-entity:{}", target);
+        Ok(make_edge(&from_id, &to_id, &rel_type))
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "ladybug")]
+fn query_node_detail_rows(db: &LadybugDb, sql: &str) -> Result<Vec<WorkspaceGraphNode>, String> {
+    let conn = lbug::Connection::new(&db.db).map_err(|e| e.to_string())?;
+    let mut nodes = Vec::new();
+    for row in conn.query(sql).map_err(|e| e.to_string())? {
+        if row.len() != 8 {
+            return Err(format!("expected 8 columns, got {}", row.len()));
+        }
+        let node_id = value_as_required_string(&row[0])?;
+        let primary_label = value_as_required_string(&row[1])?;
+        let name = value_as_required_string(&row[2])?;
+        let path = value_as_optional_string(&row[3]);
+        let qualified_name = value_as_optional_string(&row[4]);
+        let repo_id = value_as_optional_string(&row[5]);
+        let project_id = value_as_optional_string(&row[6]);
+        let text = value_as_optional_string(&row[7]);
+        nodes.push(make_ladybug_node(
+            &node_id,
+            &primary_label,
+            &name,
+            path.as_deref(),
+            qualified_name.as_deref(),
+            repo_id.as_deref(),
+            project_id.as_deref(),
+            text.as_deref(),
+        ));
+    }
+    Ok(nodes)
+}
+
+#[cfg(not(feature = "ladybug"))]
+fn query_node_detail_rows(db: &LadybugDb, sql: &str) -> Result<Vec<WorkspaceGraphNode>, String> {
+    let mut stmt = db.conn.prepare(sql).map_err(|e| e.to_string())?;
+    stmt.query_map(&[], |row| {
+        let node_id: String = row.get(0)?;
+        let primary_label: String = row.get(1)?;
+        let name: String = row.get(2)?;
+        let path: Option<String> = row.get(3).ok();
+        let qualified_name: Option<String> = row.get(4).ok();
+        let repo_id: Option<String> = row.get(5).ok();
+        let project_id: Option<String> = row.get(6).ok();
+        let text: Option<String> = row.get(7).ok();
+        Ok(make_ladybug_node(
+            &node_id,
+            &primary_label,
+            &name,
+            path.as_deref(),
+            qualified_name.as_deref(),
+            repo_id.as_deref(),
+            project_id.as_deref(),
+            text.as_deref(),
+        ))
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "ladybug")]
+fn query_single_string_column(db: &LadybugDb, sql: &str) -> Result<Vec<String>, String> {
+    let conn = lbug::Connection::new(&db.db).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in conn.query(sql).map_err(|e| e.to_string())? {
+        if row.len() != 1 {
+            return Err(format!("expected 1 column, got {}", row.len()));
+        }
+        out.push(value_as_required_string(&row[0])?);
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "ladybug"))]
+fn query_single_string_column(db: &LadybugDb, sql: &str) -> Result<Vec<String>, String> {
+    let mut stmt = db.conn.prepare(sql).map_err(|e| e.to_string())?;
+    stmt.query_map(&[], |row| row.get::<String>(0))
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "ladybug")]
+fn query_repo_project_counts(db: &LadybugDb, sql: &str) -> Result<Vec<(String, i64)>, String> {
+    let conn = lbug::Connection::new(&db.db).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in conn.query(sql).map_err(|e| e.to_string())? {
+        if row.len() != 2 {
+            return Err(format!("expected 2 columns, got {}", row.len()));
+        }
+        let id = value_as_required_string(&row[0])?;
+        let count = value_as_required_i64(&row[1])?;
+        out.push((id, count));
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "ladybug"))]
+fn query_repo_project_counts(db: &LadybugDb, sql: &str) -> Result<Vec<(String, i64)>, String> {
+    let mut stmt = db.conn.prepare(sql).map_err(|e| e.to_string())?;
+    stmt.query_map(&[], |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?)))
+        .map_err(|e| e.to_string())
+}
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -73,8 +303,11 @@ pub fn find_lbug_db_path(store_root: &str) -> Option<String> {
         }
     }
 
-    // 2. ~/.agentic-memory/*.lbug
-    if let Ok(home) = std::env::var("HOME") {
+    // 2. ~/.agentic-memory/*.lbug (HOME or USERPROFILE on Windows)
+    if let Some(home) = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+    {
         let am_dir = std::path::Path::new(&home).join(".agentic-memory");
         if let Some(path) = find_first_lbug(&am_dir) {
             return Some(path);
@@ -113,16 +346,40 @@ fn find_first_lbug(dir: &std::path::Path) -> Option<String> {
     None
 }
 
-/// Open a LadybugDB connection if a database file can be found.
-pub fn open_ladybug_db(store_root: &str) -> Option<Connection> {
-    let path = find_lbug_db_path(store_root)?;
-    match Connection::open(&path) {
-        Ok(conn) => {
-            tracing::info!(db_path = %path, "LadybugDB connection opened");
-            Some(conn)
+/// Open a Ladybug database handle if a `.lbug` file can be found.
+///
+/// Native builds open read-only to reduce accidental mutation while browsing.
+#[cfg(feature = "ladybug")]
+pub fn open_ladybug_db(store_root: &str) -> Option<LadybugDb> {
+    let path_str = find_lbug_db_path(store_root)?;
+    let path = PathBuf::from(&path_str);
+    let cfg = lbug::SystemConfig::default().read_only(true);
+    match lbug::Database::new(&path_str, cfg) {
+        Ok(db) => {
+            tracing::info!(db_path = %path_str, "LadybugDB opened (native lbug, read-only)");
+            Some(LadybugDb {
+                path,
+                db: std::sync::Arc::new(db),
+            })
         }
         Err(e) => {
-            tracing::warn!(error = %e, db_path = %path, "Failed to open LadybugDB");
+            tracing::warn!(error = %e, db_path = %path_str, "Failed to open LadybugDB");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "ladybug"))]
+pub fn open_ladybug_db(store_root: &str) -> Option<LadybugDb> {
+    let path_str = find_lbug_db_path(store_root)?;
+    let path = PathBuf::from(&path_str);
+    match crate::lbug_shim::Connection::open(&path_str) {
+        Ok(conn) => {
+            tracing::info!(db_path = %path_str, "LadybugDB shim handle opened (queries return empty)");
+            Some(LadybugDb { path, conn })
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, db_path = %path_str, "Failed to open LadybugDB shim");
             None
         }
     }
@@ -208,7 +465,7 @@ fn make_entity_node(name: &str) -> WorkspaceGraphNode {
 /// 2. Fetch node details for all endpoints.
 /// 3. Density boost — add all relationships among collected endpoints.
 pub fn explore_graph(
-    conn: &Connection,
+    db: &LadybugDb,
     limit: i64,
     repo_id: Option<&str>,
     project_id: Option<&str>,
@@ -233,12 +490,7 @@ LIMIT {};"#,
         )
     };
 
-    let mut stmt = conn.prepare(&sample_sql).map_err(|e| e.to_string())?;
-    let sample_rows: Vec<(String, String, String)> = stmt
-        .query_map(&[], |row| {
-            Ok((row.get::<String>(0)?, row.get::<String>(1)?, row.get::<String>(2)?))
-        })
-        .map_err(|e| e.to_string())?;
+    let sample_rows: Vec<(String, String, String)> = query_rows_3(db, &sample_sql)?;
 
     if sample_rows.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -256,7 +508,7 @@ LIMIT {};"#,
     }
 
     // Step 2: fetch node details
-    let nodes = fetch_node_details(conn, &endpoint_ids)?;
+    let nodes = fetch_node_details(db, &endpoint_ids)?;
 
     // Build sample edges (using ladybug: prefixed IDs)
     let mut edges: Vec<WorkspaceGraphEdge> = sample_rows
@@ -278,12 +530,7 @@ RETURN a.node_id AS source_id, b.node_id AS target_id, r.rel_type AS type;"#,
             id_list, id_list
         );
 
-        let mut stmt = conn.prepare(&density_sql).map_err(|e| e.to_string())?;
-        let density_rows: Vec<(String, String, String)> = stmt
-            .query_map(&[], |row| {
-                Ok((row.get::<String>(0)?, row.get::<String>(1)?, row.get::<String>(2)?))
-            })
-            .map_err(|e| e.to_string())?;
+        let density_rows: Vec<(String, String, String)> = query_rows_3(db, &density_sql)?;
 
         // Only add edges we don't already have
         for (s, t, r) in &density_rows {
@@ -303,7 +550,7 @@ RETURN a.node_id AS source_id, b.node_id AS target_id, r.rel_type AS type;"#,
 
 /// Fetch full `WorkspaceGraphNode` records for a list of `node_id`s.
 pub fn fetch_node_details(
-    conn: &Connection,
+    db: &LadybugDb,
     node_ids: &[String],
 ) -> Result<Vec<WorkspaceGraphNode>, String> {
     if node_ids.is_empty() {
@@ -325,38 +572,14 @@ RETURN n.node_id AS node_id, n.primary_label AS primary_label, n.name AS name,
         id_list
     );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let nodes: Vec<WorkspaceGraphNode> = stmt
-        .query_map(&[], |row| {
-            let node_id: String = row.get(0)?;
-            let primary_label: String = row.get(1)?;
-            let name: String = row.get(2)?;
-            let path: Option<String> = row.get(3).ok();
-            let qualified_name: Option<String> = row.get(4).ok();
-            let repo_id: Option<String> = row.get(5).ok();
-            let project_id: Option<String> = row.get(6).ok();
-            let text: Option<String> = row.get(7).ok();
-            Ok(make_ladybug_node(
-                &node_id,
-                &primary_label,
-                &name,
-                path.as_deref(),
-                qualified_name.as_deref(),
-                repo_id.as_deref(),
-                project_id.as_deref(),
-                text.as_deref(),
-            ))
-        })
-        .map_err(|e| e.to_string())?;
-
-    Ok(nodes)
+    query_node_detail_rows(db, &sql)
 }
 
 // ── Entity search ────────────────────────────────────────────────────
 
 /// Search for MemoryEntity nodes whose name contains the given keyword.
 pub fn search_entities_by_keyword(
-    conn: &Connection,
+    db: &LadybugDb,
     keyword: &str,
     limit: i64,
 ) -> Result<Vec<String>, String> {
@@ -368,17 +591,12 @@ RETURN n.name AS name LIMIT {};"#,
         limit
     );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let names: Vec<String> = stmt
-        .query_map(&[], |row| row.get::<String>(0))
-        .map_err(|e| e.to_string())?;
-
-    Ok(names)
+    query_single_string_column(db, &sql)
 }
 
 /// Search for MemoryEntity nodes by entity name (exact-ish match).
 pub fn search_entities_by_name(
-    conn: &Connection,
+    db: &LadybugDb,
     entity_name: &str,
     limit: i64,
 ) -> Result<Vec<String>, String> {
@@ -390,12 +608,7 @@ RETURN n.name AS name LIMIT {};"#,
         limit
     );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let names: Vec<String> = stmt
-        .query_map(&[], |row| row.get::<String>(0))
-        .map_err(|e| e.to_string())?;
-
-    Ok(names)
+    query_single_string_column(db, &sql)
 }
 
 // ── Entity relations ─────────────────────────────────────────────────
@@ -405,7 +618,7 @@ RETURN n.name AS name LIMIT {};"#,
 /// Returns `(nodes, edges)` where nodes are the entity nodes and edges are
 /// the relations between them.
 pub fn fetch_entity_relations(
-    conn: &Connection,
+    db: &LadybugDb,
     entity_names: &[String],
     limit: i64,
 ) -> Result<(Vec<WorkspaceGraphNode>, Vec<WorkspaceGraphEdge>), String> {
@@ -434,17 +647,7 @@ RETURN source.name AS source, target.name AS target, r.rel_type AS type LIMIT {}
         name_list, name_list, limit
     );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let edges: Vec<WorkspaceGraphEdge> = stmt
-        .query_map(&[], |row| {
-            let source: String = row.get(0)?;
-            let target: String = row.get(1)?;
-            let rel_type: String = row.get(2)?;
-            let from_id = format!("ladybug-entity:{}", source);
-            let to_id = format!("ladybug-entity:{}", target);
-            Ok(make_edge(&from_id, &to_id, &rel_type))
-        })
-        .map_err(|e| e.to_string())?;
+    let edges = query_entity_edges(db, &sql)?;
 
     Ok((nodes, edges))
 }
@@ -452,7 +655,7 @@ RETURN source.name AS source, target.name AS target, r.rel_type AS type LIMIT {}
 // ── Repos & projects ─────────────────────────────────────────────────
 
 /// List repositories from LadybugDB.
-pub fn list_repos(conn: &Connection, limit: i64) -> Result<Vec<(String, i64)>, String> {
+pub fn list_repos(db: &LadybugDb, limit: i64) -> Result<Vec<(String, i64)>, String> {
     let sql = format!(
         r#"MATCH (n:GraphNode)
 WHERE n.repo_id IS NOT NULL
@@ -462,16 +665,11 @@ LIMIT {};"#,
         limit
     );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows: Vec<(String, i64)> = stmt
-        .query_map(&[], |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?)))
-        .map_err(|e| e.to_string())?;
-
-    Ok(rows)
+    query_repo_project_counts(db, &sql)
 }
 
 /// List projects from LadybugDB.
-pub fn list_projects(conn: &Connection, limit: i64) -> Result<Vec<(String, i64)>, String> {
+pub fn list_projects(db: &LadybugDb, limit: i64) -> Result<Vec<(String, i64)>, String> {
     let sql = format!(
         r#"MATCH (n:GraphNode)
 WHERE n.project_id IS NOT NULL AND n.project_id <> ''
@@ -481,12 +679,7 @@ LIMIT {};"#,
         limit
     );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows: Vec<(String, i64)> = stmt
-        .query_map(&[], |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?)))
-        .map_err(|e| e.to_string())?;
-
-    Ok(rows)
+    query_repo_project_counts(db, &sql)
 }
 
 // ── Local data helpers (filesystem, no DB) ───────────────────────────

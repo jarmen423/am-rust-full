@@ -1,10 +1,11 @@
 pub mod model;
-#[cfg(feature = "server")]
-pub mod server;
 pub mod theme;
 
 pub use model::*;
 pub use theme::*;
+
+#[cfg(feature = "jina-ladybug-index")]
+pub mod repo_jina_lb;
 
 // ── Frontend modules (Phase 2) ─────────────────────────────────────
 // Gated behind the `egui` feature so the backend binary does not

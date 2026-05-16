@@ -514,14 +514,14 @@ pub async fn graph_picker(
             error!(error = %e, "picker search failed");
             Json(serde_json::json!({
                 "status": "error",
-                "items": [] as Vec<serde_json::Value>
+                "items": []
             }))
         }
         Err(e) => {
             error!(error = %e, "picker join error");
             Json(serde_json::json!({
                 "status": "error",
-                "items": [] as Vec<serde_json::Value>
+                "items": []
             }))
         }
     }
@@ -630,7 +630,7 @@ pub async fn graph_repos(
         Err(_) => {
             Json(serde_json::json!({
                 "status": "ok",
-                "repos": [] as Vec<serde_json::Value>
+                "repos": []
             }))
         }
     }
@@ -676,7 +676,7 @@ pub async fn graph_projects(
         Err(_) => {
             Json(serde_json::json!({
                 "status": "ok",
-                "projects": [] as Vec<serde_json::Value>
+                "projects": []
             }))
         }
     }

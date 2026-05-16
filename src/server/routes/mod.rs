@@ -19,7 +19,7 @@ pub struct WorkspaceState {
     /// Optional LadybugDB connection.  `None` when no `.lbug` file is found
     /// or the connection could not be established.  Routes must handle this
     /// gracefully (fallback to local-only data).
-    pub ladybug_db: Option<crate::lbug_shim::Connection>,
+    pub ladybug_db: Option<crate::store::ladybug::LadybugDb>,
 }
 
 /// Assemble all API routes into a single Router.

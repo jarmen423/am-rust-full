@@ -6,6 +6,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
+#[cfg(not(feature = "ladybug"))]
 mod lbug_shim;
 mod routes;
 mod static_files;
@@ -32,8 +33,8 @@ async fn main() {
 
     // Attempt to open LadybugDB connection (optional — graceful fallback if missing)
     let ladybug_db = store::ladybug::open_ladybug_db(&config.store_path);
-    if ladybug_db.is_some() {
-        tracing::info!("LadybugDB graph integration active");
+    if let Some(ref lb) = ladybug_db {
+        tracing::info!(db_path = %lb.path.display(), "LadybugDB graph integration active");
     } else {
         tracing::info!("LadybugDB not found — graph routes will return local-only data");
     }

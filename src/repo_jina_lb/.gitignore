@@ -1,0 +1,6 @@
+# Local secrets / tooling
+.env
+.env.*
+
+# If someone runs `cargo build` inside nested standalone-pack while still under am-workspace:
+standalone-pack/target/

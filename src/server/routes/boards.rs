@@ -191,7 +191,7 @@ pub async fn update_board(
 }
 
 /// Ingest an entire board into the graph (stub — returns mock payload).
-#[instrument(skip(state, req))]
+#[instrument(skip(_state, req))]
 pub async fn ingest_board(
     State(_state): State<Arc<WorkspaceState>>,
     Path(id): Path<String>,

@@ -1,0 +1,44 @@
+# Server static bundle (default DIST_PATH in `src/server/config.rs`)
+/dist/
+
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+
+# Optional local `cargo doc` tree
+/doc/
+
+# wasm-pack / wasm-bindgen output (optional egui/WASM builds)
+/pkg/
+/wasm-pack.log
+
+# Local env and secrets (server config, API keys)
+.env
+.env.*
+!.env.example
+
+# IDE / editors
+.idea/
+*.iml
+.vscode/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temp
+*.log
+*.tmp
+*.temp
+
+# Test / coverage (llvm-cov, tarpaulin, grcov)
+*.profraw
+*.profdata
+coverage/
+lcov.info
+tarpaulin-report.html
+
+

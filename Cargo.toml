@@ -16,9 +16,29 @@ path = "src/server/main.rs"
 name = "workspace-app"
 path = "src/app_main.rs"
 
+[[bin]]
+name = "jina-ladybug-repo-index"
+path = "src/bin/jina_ladybug_repo_index.rs"
+required-features = ["jina-ladybug-index"]
+
 [features]
-default = ["server"]
-server = []
+default = ["ladybug"]
+ladybug = ["dep:lbug"]
+jina-ladybug-index = [
+    "ladybug",
+    "dep:clap",
+    "dep:ignore",
+    "dep:md-5",
+    "dep:protobuf",
+    "dep:reqwest",
+    "dep:scip",
+    "dep:sha2",
+    "dep:tree-sitter",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-typescript",
+]
 egui = [
     "dep:egui",
     "dep:eframe",
@@ -41,6 +61,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+lbug = { version = "0.16.1", optional = true }
 
 # Frontend dependencies (gated behind egui feature)
 egui = { version = "0.30", optional = true }
@@ -50,6 +71,20 @@ wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 parking_lot = { version = "0.12", optional = true }
+
+# Optional: Jina v4 → native Ladybug code graph (see `src/bin/jina_ladybug_repo_index.rs`).
+clap = { version = "4", features = ["derive", "env"], optional = true }
+ignore = { version = "0.4", optional = true }
+md-5 = { version = "0.10", optional = true }
+protobuf = { version = "3.7", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"], optional = true }
+scip = { version = "0.7.1", optional = true }
+sha2 = { version = "0.10", optional = true }
+tree-sitter = { version = "0.24", optional = true }
+tree-sitter-javascript = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-rust = { version = "0.23", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -292,7 +292,7 @@ pub async fn note_picker(
             error!(error = %e, "failed to fetch picker");
             Json(serde_json::json!({
                 "status": "error",
-                "items": [] as Vec<serde_json::Value>
+                "items": []
             }))
         }
     }
