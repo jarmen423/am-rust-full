@@ -18,7 +18,8 @@ When changing ingest logic, update **both** unless you intentionally fork—see 
 | Context | Command sketch |
 |---------|----------------|
 | Workspace binary | `cargo run -p am-workspace --features jina-ladybug-index --bin jina-ladybug-repo-index -- …` |
-| Standalone pack | `cd standalone-pack && cargo run --release -- …` |
+| Standalone pack | **`May be incomplete`;** after copying from **`standalone-pack/`**, ensure all `*.rs` from parent **`repo_jina_lb`** are present (`lib.rs` from `mod.rs`), then run `cargo run --release -- …`. |
+
 
 ## Secrets & env
 
@@ -32,6 +33,10 @@ Do not commit `.env`, API keys, or `.lbug` databases.
 - **Link errors on Windows**: usually wrong Ladybug artifact (prefer shared DLL flow — `lbug-crate-windows.md` at workspace root).
 - **Embedding width mismatch**: `--dimensions` must match stored DDL for `Chunk.embedding`.
 - **429 / HTTP errors from Jina**: reduce `--batch-units`, retry; failures print `ERR <path>: …` per file.
+
+## Incremental ingest
+
+Same path lines **`ok`** (full Jina + Chunk path) vs **`skip`** when DB row is **`complete`**, **`source_hash`** matches disk MD5, and **`properties_json.jina_fingerprint`** matches **`model|task|dimensions`**. **`--force-reindex`** forces the heavy path regardless. Older DBs without **`jina_fingerprint`** ingest fully once to populate it. SCIP **`CALLS`** alignment still parses every skipped file.
 
 ## Tests
 

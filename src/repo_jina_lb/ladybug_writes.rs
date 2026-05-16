@@ -203,7 +203,9 @@ pub(crate) fn upsert_file_pending(
 ) -> Result<(), String> {
     let pk_esc = esc_lit(id);
     let probe = conn
-        .query(&format!("MATCH (f:File) WHERE f.id = \"{pk_esc}\" RETURN 1 LIMIT 1;"))
+        .query(&format!(
+            "MATCH (f:File) WHERE f.id = \"{pk_esc}\" RETURN 1 LIMIT 1;"
+        ))
         .map_err(|e| format!("File existence probe failed: {e}"))?;
     let exists = probe.into_iter().next().is_some();
 
@@ -220,32 +222,31 @@ pub(crate) fn upsert_file_pending(
 
     if exists {
         conn.query(&format!(
-        "MATCH (f:File) WHERE f.id = \"{}\" \
+            "MATCH (f:File) WHERE f.id = \"{}\" \
          SET f.repo_id = \"{}\", f.path = \"{}\", f.name = \"{}\", f.text = \"{}\", f.properties_json = \"{}\";",
-        esc_lit(id),
-        esc_lit(repo_id),
-        esc_lit(rel_path),
-        esc_lit(name),
-        esc_lit(rel_path),
-        props_esc,
-    ))
-    .map(|_| ())
-    .map_err(|e| format!("File pending update failed: {e}"))
+            esc_lit(id),
+            esc_lit(repo_id),
+            esc_lit(rel_path),
+            esc_lit(name),
+            esc_lit(rel_path),
+            props_esc,
+        ))
+        .map(|_| ())
+        .map_err(|e| format!("File pending update failed: {e}"))
     } else {
-
-    conn.query(&format!(
-        "CREATE (f:File {{ \
+        conn.query(&format!(
+            "CREATE (f:File {{ \
           id: \"{}\", repo_id: \"{}\", path: \"{}\", name: \"{}\", text: \"{}\", properties_json: \"{}\" \
         }});",
-        esc_lit(id),
-        esc_lit(repo_id),
-        esc_lit(rel_path),
-        esc_lit(name),
-        esc_lit(rel_path),
-        props_esc,
-    ))
-    .map(|_| ())
-    .map_err(|e| format!("File create failed: {e}"))
+            esc_lit(id),
+            esc_lit(repo_id),
+            esc_lit(rel_path),
+            esc_lit(name),
+            esc_lit(rel_path),
+            props_esc,
+        ))
+        .map(|_| ())
+        .map_err(|e| format!("File create failed: {e}"))
     }
 }
 
@@ -259,6 +260,7 @@ pub(crate) fn mark_file_and_document_complete(
     name: &str,
     ohash: &str,
     repo_root: &str,
+    jina_fingerprint: &str,
 ) -> Result<(), String> {
     let meta = esc_lit(r#"{"storage_mode":"native","ingest":"jina-ladybug-repo-index"}"#);
     let updated = esc_lit(&now_rfc3339_secs());
@@ -286,6 +288,7 @@ pub(crate) fn mark_file_and_document_complete(
         "repo_root": repo_root,
         "last_indexed_at": now_rfc3339_secs(),
         "storage_mode": "native",
+        "jina_fingerprint": jina_fingerprint,
     })
     .to_string();
     let props_esc = esc_lit(&props);
@@ -303,6 +306,52 @@ pub(crate) fn mark_file_and_document_complete(
     .map_err(|e| format!("File completion failed: {e}"))
 }
 
+/// Runs before we attempt to skip ingest: pulls `CodeDocument` hash/status plus **`jina_fingerprint`**
+/// from **`File.properties_json`** (`None` fingerprint ⇒ caller must **not** short‑circuit ingest).
+pub(crate) fn fetch_indexed_document_snapshot(
+    conn: &Connection<'_>,
+    doc_id: &str,
+    file_pk: &str,
+) -> Result<Option<(String, String, Option<String>)>, String> {
+    let de = esc_lit(doc_id);
+    let fe = esc_lit(file_pk);
+    let stmt = format!(
+        "MATCH (d:CodeDocument), (f:File) WHERE d.id = \"{de}\" AND f.id = \"{fe}\" \
+         RETURN d.source_hash, d.index_status, f.properties_json LIMIT 1;",
+    );
+    let mut qr = conn
+        .query(&stmt)
+        .map_err(|e| format!("indexed snapshot probe failed: {e}"))?;
+    let Some(row) = qr.next() else {
+        return Ok(None);
+    };
+    if row.len() < 3 {
+        return Ok(None);
+    }
+    let sh = match &row[0] {
+        Value::String(s) => s.clone(),
+        _ => return Ok(None),
+    };
+    let status = match &row[1] {
+        Value::String(s) => s.clone(),
+        _ => return Ok(None),
+    };
+    let fp = match &row[2] {
+        Value::String(props_json) => serde_json::from_str::<serde_json::Value>(props_json).ok(),
+        _ => None,
+    }
+    .and_then(|v| {
+        v.get("jina_fingerprint")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+    });
+    Ok(Some((sh, status, fp)))
+}
+
+pub(crate) fn jina_fingerprint_for_run(model: &str, task: &str, dimensions: usize) -> String {
+    format!("{model}|{task}|{dimensions}")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn upsert_function_node(
     conn: &Connection<'_>,
@@ -317,13 +366,13 @@ pub(crate) fn upsert_function_node(
 ) -> Result<(), String> {
     let text_stored = stored_visible_code(text_for_embedding);
     let props = serde_json::json!({
-        "code_hash": super::ids::sha256_hex_utf8(text_for_embedding),
+        "code_hash": crate::repo_jina_lb::ids::sha256_hex_utf8(text_for_embedding),
         "signature": signature,
+        "name_line": name_line,
         "text_truncated": text_for_embedding.chars().count() > MAX_STORED_CODE_TEXT_CHARS,
         "embedding_model": "jina-embeddings-v4",
         "embedding_task": "code.passage",
         "storage_mode": "native",
-        "name_line": name_line,
     })
     .to_string();
 
@@ -352,7 +401,7 @@ pub(crate) fn upsert_class_node(
 ) -> Result<(), String> {
     let text_stored = stored_visible_code(text_for_embedding);
     let props = serde_json::json!({
-        "code_hash": super::ids::sha256_hex_utf8(text_for_embedding),
+        "code_hash": crate::repo_jina_lb::ids::sha256_hex_utf8(text_for_embedding),
         "signature": signature,
         "text_truncated": text_for_embedding.chars().count() > MAX_STORED_CODE_TEXT_CHARS,
         "embedding_model": "jina-embeddings-v4",
@@ -478,13 +527,11 @@ pub(crate) fn create_rel_calls(conn: &Connection<'_>, caller_id: &str, callee_id
         return Ok(false);
     }
 
-    let props_meta = esc_lit(r#"{"source":"scip"}"#);
     conn.query(&format!(
         "MATCH (caller:Function), (callee:Function) WHERE caller.id=\"{}\" AND callee.id=\"{}\" \
-         CREATE (caller)-[:CALLS {{ properties_json: \"{}\" }}]->(callee);",
+         CREATE (caller)-[:CALLS {{ properties_json: \"{{}}\" }}]->(callee);",
         esc_lit(caller_id),
         esc_lit(callee_id),
-        props_meta,
     ))
     .map(|_| ())
     .map_err(|e| format!("CREATE CALLS failed: {e}"))?;

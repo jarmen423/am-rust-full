@@ -63,8 +63,28 @@ $env:JINA_API_KEY = "paste-your-key-here"
 | **`--repo-id`** | Stored on every row (pick something stable for that codebase). |
 | **`--init-schema`** | **First time only** for this DB: create Ladybug tables + vector bits. Omit next time unless you deleted the DB. |
 | **`--scip`** | *(Optional)* Path to **`index.scip`**. If omitted, search `index.scip` / `target/index.scip` / `.scip/index.scip` under `--repo`. Requires **rust-analyzer**-style SCIP for Rust `CALLS`. |
+| **`--force-reindex`** | Force a full ingest (delete per-file derivatives, Jina embed, Chunk rewrite) even when MD5 + **`jina_fingerprint`** already match the DB. Rarely needed unless you deliberately want vectors refreshed. |
 
 Embedding width defaults to **`2048`** (Jina v4 dense max). Use **`--dimensions`** only if you intentionally changed how you created **`Chunk.embedding`** in that DB.
+
+---
+
+## 3.1 Incremental runs (`ok` vs `skip`)
+
+Progress lines are printed to **stderr** (one line per source file):
+
+- **`ok  <relative/path>`** — full ingest ran (derivatives refreshed, Jina called, Chunk rows written/updated).
+- **`skip <relative/path>`** — file was **unchanged** for embedding purposes; the indexer avoided **`delete_file_derivatives`**, Jina HTTP, and Chunk writes.
+
+A **`skip`** is allowed only when **all** of the following hold (unless **`--force-reindex`**):
+
+1. **`CodeDocument.index_status`** is **`complete`**.
+2. **`CodeDocument.source_hash`** equals the current file MD5.
+3. **`File.properties_json`** parses and contains **`jina_fingerprint`** equal to **`{--jina-model}|{--jina-task}|{--dimensions}`** (written at **`mark_*_complete`**).
+
+**First run after upgrading:** databases indexed **before** `jina_fingerprint` existed may show **`ok`** everywhere once; after that, unchanged files **`skip`** as expected.
+
+Even on **`skip`**, the indexer still parses the file so **rust-analyzer `CALLS`** (optional SCIP pass) keeps correct **`Function`** line anchors.
 
 ---
 
@@ -83,13 +103,13 @@ rust-analyzer scip .
 
 This usually creates **`index.scip`** in the repo root. Override with **`--scip`** if you store it elsewhere.
 
-If **`--scip`** is omitted, search order under `--repo` is: `index.scip`, then `target/index.scip`, then `.scip/index.scip`.
+If **`--scip`** is omitted, search order under `--repo` is: `index.scip`, then `target/index.scip`, then `.scip/index.scip` — **these must be exactly that protobuf filename** (not an arbitrary `.scip` name). If nothing is found you should see **`scip: skipped`** on stderr before the process exits; that means `--repo` and the SCIP location disagree.
 
 ### Rust-only v1
 
 - Only SCIP documents with `language` starting with **`rust`** are used.
-- **`Relationship { is_reference: true }`** from callable symbols (function, method, …) is turned into **`CALLS`** when both endpoints resolve to **`Function`** rows from this run (via line anchors). Unresolved pairs are skipped.
-- “Reference” is broader than “call”; expect some non-call edges until heuristics tighten.
+- **rust-analyzer** emits empty **`SymbolInformation.relationships`**; **`CALLS`** are inferred primarily from **`occurrences`**: non-definition usages plus the nearest preceding callable **definition line in the same SCIP document**. When another SCIP tool fills **`relationships`** with **`is_reference: true`** (excluding type-definition edges), those are still turned into **`CALLS`** (`Function → Function`).
+- Anything that resolves to **`Function`** nodes from this indexer run participates; other references are skipped silently. Edges lean “reference-heavy” versus strict call-only until heuristics tighten.
 
 ---
 

@@ -18,4 +18,4 @@ Details: [`install.md`](./install.md).
 
 ## Keeping workspace + standalone in sync
 
-After changing Rust sources **here**, mirror the same edits into `standalone-pack/src/` (except `lib.rs`, which is a copy of `mod.rs`). Until this repo adopts a workspace member path crate, **manual sync** avoids drift.
+Canonical sources live in **`src/repo_jina_lb/*.rs`** in this workspace. **`standalone-pack/`** is a copy-out template: after changing ingest logic, mirror the Rust files into **`standalone-pack/src/`** (`lib.rs` ↔ `mod.rs`). If the template is missing copies, **`cargo build` inside `standalone-pack` will not match this module** until you resync manually.

@@ -31,12 +31,14 @@ Remove-Item Env:lbug_library_dir -ErrorAction SilentlyContinue
 Remove-Item Env:lbug_include_dir -ErrorAction SilentlyContinue
 
 $env:LBUG_SHARED = "1"
-$env:LBUG_LIBRARY_DIR = "C:\path\to\folder\with\lbug_shared.dll_and_lbug_shared.lib"
-$env:LBUG_INCLUDE_DIR  = "C:\LadybugRust-msvc\include"
+# Folder that contains **`lbug_shared.lib`** (or importer `.lib`) and **`lbug_shared.dll`** — *not*
+# `src\include`, and never the same folder as merged headers unless you merged both there on purpose.
+$env:LBUG_LIBRARY_DIR = "D:\LadybugRust-msvc\lib"
+$env:LBUG_INCLUDE_DIR = "D:\LadybugRust-msvc\include"
 ```
 
-- **Library** dir = ZIP folder (DLL + `.lib` only is fine).
-- **Include** dir = merged folder above (**not** `src\include` alone, unless you copied `lbug.hpp` into it).
+- **Library** dir = shared **release ZIP** unpack (imports + **`lbug_shared.dll`**).
+- **Include** dir = merged folder with **`lbug.hpp` / `lbug.h` from ZIP** plus **`common\...` from git `src\include`** (`statement_type.h` etc.).
 
 ## Clean rebuild after any env/path change
 

@@ -7,14 +7,16 @@
 //!
 //! ## Operational flow (`jina-ladybug-repo-index` binary)
 //! 1. Walk the repository with `ignore` (respect `.gitignore`).
-//! 2. For each source file (`rs`, `py`, `js`/`jsx`, `ts`/`tsx`), parse tree-sitter
-//!    units (`parse`).
-//! 3. Embed unit texts via Jina `code.passage` (`jina`).
+//! 2. For each source file (`rs`, `py`, `js`/`jsx`, `ts`/`tsx`), either **fast-path** when the
+//!    `CodeDocument` is **`complete`**, MD5 matches, and **`File.properties_json.jina_fingerprint`**
+//!    matches the current model/task/dimensions (logs **`skip`**, still re-parses for SCIP anchors),
+//!    or perform a **full ingest** path: parse tree-sitter units (`parse`).
+//! 3. On full ingest only, embed unit texts via Jina `code.passage` (`jina`).
 //! 4. Write nodes/edges via prepared `Chunk` inserts and interpolated Cypher for
 //!    graph labels (`ladybug_writes`) — **`DETACH DELETE` old `Chunk` before `CREATE`**
 //!    when revisiting the same deterministic `chunk:` id.
 //! 5. Optionally load **rust-analyzer `index.scip`** and write **`CALLS`** edges
-//!    (`scip_calls`), aligned via definition-line anchors captured during step 2.
+//!    (`scip_calls`), aligned via definition-line anchors captured while walking each file.
 
 pub mod calls_registry;
 pub mod ids;
@@ -33,7 +35,8 @@ use scip_calls::{ingest_scip_calls, resolve_scip_index_path};
 
 use ladybug_writes::{
     create_rel_defines, create_rel_describes, delete_file_derivatives,
-    insert_chunk_dense, init_code_schema, mark_file_and_document_complete, open_writable_database,
+    fetch_indexed_document_snapshot, insert_chunk_dense, init_code_schema,
+    jina_fingerprint_for_run, mark_file_and_document_complete, open_writable_database,
     trim_for_embedding, upsert_code_document_pending, upsert_file_pending,
     upsert_class_node, upsert_function_node,
 };
@@ -86,6 +89,10 @@ pub struct Cli {
     /// Path to protobuf **`index.scip`** (rust-analyzer). Overrides auto-discovery under `--repo`.
     #[arg(long, value_name = "PATH")]
     pub scip: Option<PathBuf>,
+
+    /// Recompute embeddings and Ladybug derivatives even when the file hash and **`jina_fingerprint`** unchanged.
+    #[arg(long)]
+    pub force_reindex: bool,
 }
 
 /// Parsed CLI entry point for tooling and tests.
@@ -185,8 +192,10 @@ pub fn main_cli() -> Result<(), String> {
             dims,
             cli.batch_units,
             &mut fn_registry,
+            cli.force_reindex,
         ) {
-            Ok(()) => eprintln!("ok  {rel}"),
+            Ok(true) => eprintln!("ok  {rel}"),
+            Ok(false) => eprintln!("skip {}", rel),
             Err(err) => eprintln!("ERR {rel}: {err}"),
         }
     }
@@ -206,6 +215,14 @@ pub fn main_cli() -> Result<(), String> {
             }
             Err(err) => eprintln!("ERR scip ingest: {err}"),
         }
+    } else {
+        eprintln!(
+            "scip: skipped — no index file found (use --scip PATH or place protobuf file as `{}`, `{}`, or `{}` under repo root {})",
+            "index.scip",
+            Path::new("target").join("index.scip").to_string_lossy(),
+            Path::new(".scip").join("index.scip").to_string_lossy(),
+            repo_root_disp,
+        );
     }
 
     Ok(())
@@ -215,10 +232,17 @@ fn posix_path_display(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
-/// Index one file: delete derivatives, pending upserts → embed → Chunk rows → completion.
+/// Index one source file into Ladybug (`Chunk` embeddings + typed graph nodes).
 ///
-/// Embedding failures roll back semantics at the Chunk layer only indirectly: we detach-delete
-/// per-chunk ids before recreate; callers may choose to rerun the whole file.
+/// ## Unchanged-files fast path (`Ok(false)`)
+///
+/// Skips **`delete_file_derivatives`**, pending upserts, Jina HTTPS calls, and Chunk writes when
+/// `CodeDocument` is already **`complete`**, **`source_hash`** matches fresh MD5, and
+/// **`File.properties_json.jina_fingerprint`** equals the fingerprint for **`--jina-model`** /
+/// **`--jina-task`** / **`--dimensions`**. Anchors SCIP callers still consume by re-walking syntax
+/// and refilling **`FunctionAnchorRegistry`** (definition line + deterministic `Function` PK).
+///
+/// Returns **`Ok(true)`** if a full ingest ran, **`Ok(false)`** when skipped successfully.
 fn index_one_file(
     conn: &lbug::Connection<'_>,
     http: &reqwest::blocking::Client,
@@ -232,16 +256,41 @@ fn index_one_file(
     embed_dims: usize,
     batch_units: usize,
     fn_registry: &mut FunctionAnchorRegistry,
-) -> Result<(), String> {
+    force_reindex: bool,
+) -> Result<bool, String> {
     let abs = join_rel_paths(repo_root_path, rel_posix);
     let bytes = std::fs::read(&abs).map_err(|e| format!("read {}: {e}", abs.display()))?;
     let md5_hex = ids::md5_hex(&bytes);
     let Ok(source) = String::from_utf8(bytes) else {
-        return Ok(()); // skip binary-ish file quietly
+        // Legacy behavior: silently ignore non-UTF8 files (binary assets).
+        return Ok(true);
     };
 
     let fid = ids::file_id(repo_id, rel_posix);
     let doc_pk = ids::document_id(repo_id, rel_posix);
+    let fingerprint = jina_fingerprint_for_run(jopts.model, jopts.task, embed_dims);
+
+    if !force_reindex {
+        match fetch_indexed_document_snapshot(conn, doc_pk.as_str(), fid.as_str())? {
+            Some((stored_hash, status, Some(fp)))
+                if stored_hash == md5_hex && status == "complete" && fp == fingerprint =>
+            {
+                let units = extract_units(rel_posix, lang, &source);
+                for unit in &units {
+                    if unit.target_table == "Function" {
+                        let fun = ids::function_id(repo_id, unit.signature.as_str());
+                        fn_registry.record_function_anchor(rel_posix, unit.name_line, fun);
+                    }
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
+    if batch_units == 0 {
+        return Err("--batch-units must be positive".into());
+    }
 
     delete_file_derivatives(conn, repo_id, rel_posix)?;
 
@@ -266,9 +315,6 @@ fn index_one_file(
     )?;
 
     let units = extract_units(rel_posix, lang, &source);
-    if batch_units == 0 {
-        return Err("--batch-units must be positive".into());
-    }
 
     for slice in units.chunks(batch_units) {
         let mut passages: Vec<String> = Vec::with_capacity(slice.len());
@@ -365,7 +411,9 @@ fn index_one_file(
         &file_stem,
         &md5_hex,
         repo_root_disp,
-    )
+        fingerprint.as_str(),
+    )?;
+    Ok(true)
 }
 
 /// Join POSIX `repo_root/relative` segments regardless of OS — repo roots are canonically resolved first.

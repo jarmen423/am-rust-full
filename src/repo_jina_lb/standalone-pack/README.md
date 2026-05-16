@@ -9,10 +9,11 @@ Embed repository source with **[Jina](https://jina.ai/) `jina-embeddings-v4`** (
 - Batched HTTPS calls to Jina embeddings API (`jina`).
 - Prepared statements + Cypher for graph writes (`ladybug_writes`), **`DETACH DELETE` before `CREATE`** per deterministic chunk id.
 - Optional **`CALLS`** edges (**Rust v1**) from **`index.scip`** (`scip_calls`; aligns anchors via `calls_registry`, populated during ingest).
+- Incremental **`ok` / `skip`** ingest when **`jina_fingerprint`** + **`source_hash`** match (see **`jina-embeddings.md`** beside **`am-workspace`** / parent **`repo_jina_lb`** docs).
 
 ## Quickstart
 
-See **[install.md](./install.md)** for extract-from-monorepo notes, Windows Ladybug DLL setup, and example `cargo run` lines.
+See parent **[`install.md`](../install.md)** (monorepo) for extract-from-workspace notes, Windows Ladybug DLL setup, and example `cargo run` lines.
 
 Minimal run:
 
@@ -42,7 +43,9 @@ cargo run --release -- \
 
 ## Origin
 
-Extracted from the **`am-workspace`** repository (`repo_jina_lb` module). When contributing upstream, reconcile changes with that tree.
+Extracted from the **`am-workspace`** **`repo_jina_lb`** module (`src/repo_jina_lb/`). This **`standalone-pack/`** checkout may omit some mirrored **`src/*.rs`** files; **`cargo build` here may fail until you copy sources from the parent module (typically use **`mod.rs`** as **`src/lib.rs`**) plus the sibling `*.rs` files. See parent **[`README.md`](../README.md)** and **[`install.md`](../install.md)**.
+
+When contributing upstream, reconcile changes with the in-tree **`repo_jina_lb`** sources.
 
 ## License
 

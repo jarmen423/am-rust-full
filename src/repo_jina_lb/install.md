@@ -8,7 +8,7 @@
    Copy-Item -Recurse "D:\code\agentic-memory\am-rust-full\src\repo_jina_lb\standalone-pack" "D:\code\jina-ladybug-repo-index"
    ```
 
-2. Open that folder — it must contain `Cargo.toml`, `src/`, `README.md`, `install.md`, `.gitignore`.
+2. Open that folder — it contains **`Cargo.toml`**, **`src/`**, **`README.md`**, **`.gitignore`**. **`install.md`** is not duplicated there; copy it from **`src/repo_jina_lb/install.md`** in this repo **or** use workspace **`jina-embeddings.md`**. Also copy any missing **`src/*.rs`** from **`src/repo_jina_lb/`** so the crate matches **`mod.rs`** upstream (see **`README.md`** sync note).
 
 3. Build:
 
@@ -63,7 +63,13 @@ cargo run --release -- `
   --dimensions 2048
 ```
 
-Flags match `clap` definitions in `src/lib.rs`: `--batch-units`, `--jina-model`, `--jina-task`, optional `--scip`, etc.
+Flags match `clap` definitions in **`mod.rs`** (standalone: `src/lib.rs`): `--batch-units`, `--jina-model`, `--jina-task`, optional `--scip`, **`--force-reindex`**, etc.
+
+### Incremental runs
+
+- Lines **`ok  path`** vs **`skip path`** behave as in **`jina-embeddings.md`** (workspace root): **`skip`** means same MD5 + stored **`jina_fingerprint`** (model | task | dimensions); no Jina / no Chunk churn for that file.
+- **`--force-reindex`** disables skipping.
+- Older `.lbug` files without **`jina_fingerprint`** on `File` get a full ingest until completion writes it.
 
 ## `CALLS` via rust-analyzer SCIP (optional, Rust v1)
 
@@ -74,7 +80,11 @@ Set-Location D:\path\to\repo
 rust-analyzer scip .
 ```
 
-Then either rely on auto-discovery (`index.scip` next to `--repo`) or pass **`--scip D:\path\to\index.scip`**. See **[`jina-embeddings.md`](../../jina-embeddings.md)** in this workspace for semantics and limitations.
+Auto-discovery looks **only** for the protobuf basename **`index.scip`** under `--repo`:
+`index.scip` (repo root), `target/index.scip`, or `.scip/index.scip`.
+If none match, stderr prints **`scip: skipped`** (no SILENT noop). Prefer **`--scip`** with an absolute path when in doubt.
+
+Then either rely on that discovery or pass **`--scip D:\path\to\index.scip`**. See **[`jina-embeddings.md`](../../jina-embeddings.md)** in this workspace for semantics and limitations.
 
 ## Embedding dimension
 

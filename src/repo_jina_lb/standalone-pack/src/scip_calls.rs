@@ -1,12 +1,13 @@
 //! **`CALLS` edges from rust-analyzer `index.scip`.**
 //!
-//! SCIP encodes cross-symbol edges on [`scip::types::SymbolInformation::relationships`].
-//! For **call graph v1** we treat **`Relationship { is_reference: true }`** emanating from a
-//! callable symbol (function / method / …) as **`Function → Function` `CALLS`**, then align
-//! endpoints to Ladybug rows using **definition line** + path (see [`super::calls_registry`]).
+//! upstream **rust-analyzer** emits **`SymbolInformation::relationships` empty** (`Vec::new()` in its CLI).
+//! When relationships are populated (other SCIP emitters), this crate still consumes them; for **RA**,
+//! **`CALLS`** is inferred mainly from **`Document::occurrences`**: definitions anchor symbols to **`(POSIX path,
+//! 1-based line)`**, and **non-definition** occurrences become **`caller → callee`** edges using the
+//! **nearest preceding callable definition line in that document** plus the occurrence **`symbol`**
+//! (lexical heuristic; usages that aren’t **`Function`** nodes in Ladybug are skipped naturally).
 //!
-//! This is intentionally **Rust-only**: only `Document.language` values that parse as `rust*`
-//! participate. Unresolved pairs are skipped.
+//! **Rust-only** (`document.language` starts with **`rust`**).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use protobuf::Enum;
 use protobuf::Message;
 use scip::symbol;
 use scip::types::symbol_information::Kind;
-use scip::types::{Document, Index, SymbolInformation, SymbolRole};
+use scip::types::{Document, Index, Occurrence, SymbolInformation, SymbolRole};
 
 use super::calls_registry::FunctionAnchorRegistry;
 use super::ladybug_writes::create_rel_calls;
@@ -86,6 +87,107 @@ fn build_symbol_definition_anchors(index: &Index) -> HashMap<String, (String, us
     }
 
     map
+}
+
+/// First SCIP **`range`** line (0-based) as **1-based** lines (parity with ingest / [`build_symbol_definition_anchors`]).
+fn occurrence_anchor_line_1based(occ: &Occurrence) -> usize {
+    let line0 = occ.range.first().copied().unwrap_or(0).max(0) as usize;
+    line0.saturating_add(1)
+}
+
+/// Callable defs in **`doc`** with global anchors → sorted **(definition line ascending, SCIP symbol id)**.
+fn sorted_callable_def_lines(doc: &Document, anchors: &HashMap<String, (String, usize)>) -> Vec<(usize, String)> {
+    let mut defs: Vec<(usize, String)> = doc
+        .symbols
+        .iter()
+        .filter(|si| scip_si_is_callable_origin(si))
+        .filter_map(|si| anchors.get(&si.symbol).map(|(_, line)| (*line, si.symbol.clone())))
+        .collect();
+    defs.sort_by(|a, b| a.0.cmp(&b.0));
+    defs
+}
+
+fn nearest_caller_symbol(sorted_callable_defs: &[(usize, String)], ref_line_1based: usize) -> Option<&str> {
+    let idx = sorted_callable_defs.partition_point(|(line, _)| *line <= ref_line_1based);
+    if idx == 0 {
+        None
+    } else {
+        Some(sorted_callable_defs[idx - 1].1.as_str())
+    }
+}
+
+fn try_create_calls_pair(
+    conn: &lbug::Connection<'_>,
+    registry: &FunctionAnchorRegistry,
+    anchors: &HashMap<String, (String, usize)>,
+    caller_sym: &str,
+    callee_sym: &str,
+    written: &mut usize,
+    errors: &mut usize,
+) {
+    let Some((caller_path, caller_line)) = anchors.get(caller_sym) else {
+        return;
+    };
+    let Some((callee_path, callee_line)) = anchors.get(callee_sym) else {
+        return;
+    };
+    let Some(caller_pk) = registry.pk_for_path_line(caller_path, *caller_line) else {
+        return;
+    };
+    let Some(callee_pk) = registry.pk_for_path_line(callee_path, *callee_line) else {
+        return;
+    };
+    match create_rel_calls(conn, caller_pk, callee_pk) {
+        Ok(true) => *written += 1,
+        Ok(false) => {}
+        Err(e) => {
+            *errors += 1;
+            eprintln!("scip: CALLS {:?} -> {:?}: {e}", caller_pk, callee_pk);
+        }
+    }
+}
+
+/// Infer **`CALLS`** from occurrences (handles rust-analyzer’s empty **`relationships`**).
+fn apply_occurrences_from_doc(
+    conn: &lbug::Connection<'_>,
+    registry: &FunctionAnchorRegistry,
+    anchors: &HashMap<String, (String, usize)>,
+    doc: &Document,
+    written: &mut usize,
+    errors: &mut usize,
+) {
+    if !document_is_rust(doc) {
+        return;
+    }
+    let sorted_defs = sorted_callable_def_lines(doc, anchors);
+    if sorted_defs.is_empty() {
+        return;
+    }
+    let def_flag = SymbolRole::Definition.value();
+    for occ in &doc.occurrences {
+        if occ.symbol.is_empty() || symbol::is_local_symbol(&occ.symbol) {
+            continue;
+        }
+        if (occ.symbol_roles & def_flag) != 0 {
+            continue;
+        }
+        let line_ref = occurrence_anchor_line_1based(occ);
+        let Some(caller_sym) = nearest_caller_symbol(&sorted_defs, line_ref) else {
+            continue;
+        };
+        if caller_sym == occ.symbol.as_str() {
+            continue;
+        }
+        try_create_calls_pair(
+            conn,
+            registry,
+            anchors,
+            caller_sym,
+            occ.symbol.as_str(),
+            written,
+            errors,
+        );
+    }
 }
 
 fn apply_relationships_from_doc(
@@ -159,6 +261,7 @@ pub(crate) fn ingest_scip_calls(
 
     for doc in &index.documents {
         apply_relationships_from_doc(conn, registry, &anchors, doc, &mut written, &mut errors);
+        apply_occurrences_from_doc(conn, registry, &anchors, doc, &mut written, &mut errors);
     }
 
     // `external_symbols` can hold package metadata; Rust call targets in the same workspace
@@ -195,5 +298,13 @@ mod tests {
             Some(&("src/lib.rs".into(), 10usize)),
             "SCIP lines are 0-based; anchors use 1-based name_line parity with tree-sitter"
         );
+    }
+
+    #[test]
+    fn nearest_preceding_callable_partition() {
+        let defs = [(5_usize, "a".into()), (20_usize, "b".into())];
+        assert_eq!(super::nearest_caller_symbol(&defs, 3), None);
+        assert_eq!(super::nearest_caller_symbol(&defs, 6), Some("a"));
+        assert_eq!(super::nearest_caller_symbol(&defs, 26), Some("b"));
     }
 }

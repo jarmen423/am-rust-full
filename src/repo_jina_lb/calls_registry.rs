@@ -4,6 +4,16 @@
 
 use std::collections::HashMap;
 
+/// Normalize repo-relative paths so **walk output** and **SCIP**
+/// [`scip::types::Document::relative_path`] keys match (`\` → `/`, strip leading `./`).
+pub(crate) fn normalize_repo_rel_path(rel: &str) -> String {
+    let mut s = rel.replace('\\', "/");
+    while s.starts_with("./") {
+        s = s.trim_start_matches("./").to_owned();
+    }
+    s
+}
+
 /// Keys use POSIX path segments (mirrors [`super::parse::rel_path_posix`]).
 #[derive(Default, Debug)]
 pub(crate) struct FunctionAnchorRegistry {
@@ -21,7 +31,7 @@ impl FunctionAnchorRegistry {
         name_line_1based: usize,
         function_pk: String,
     ) {
-        let path = rel_path_posix.replace('\\', "/");
+        let path = normalize_repo_rel_path(rel_path_posix);
         self.by_path_and_line
             .insert((path, name_line_1based), function_pk);
     }
@@ -31,7 +41,7 @@ impl FunctionAnchorRegistry {
         rel_path_posix: &str,
         name_line_1based: usize,
     ) -> Option<&str> {
-        let path = rel_path_posix.replace('\\', "/");
+        let path = normalize_repo_rel_path(rel_path_posix);
         self.by_path_and_line
             .get(&(path, name_line_1based))
             .map(|s| s.as_str())
@@ -51,5 +61,13 @@ mod tests {
         let mut r = FunctionAnchorRegistry::default();
         r.record_function_anchor("src\\foo\\bar.rs", 10, "function:x".into());
         assert_eq!(r.pk_for_path_line("src/foo/bar.rs", 10), Some("function:x"));
+    }
+
+    #[test]
+    fn normalizes_leading_dot_slash_like_scip_relative_path() {
+        let mut r = FunctionAnchorRegistry::default();
+        r.record_function_anchor("src/lib.rs", 5, "function:y".into());
+        assert_eq!(r.pk_for_path_line("./src/lib.rs", 5), Some("function:y"));
+        assert_eq!(r.pk_for_path_line("./src\\lib.rs", 5), Some("function:y"));
     }
 }
