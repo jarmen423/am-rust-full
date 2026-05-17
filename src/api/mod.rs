@@ -3,7 +3,7 @@
 //! Uses `ehttp` for async requests that work in both native and WASM.
 //! All functions return a `Promise<T>` that the UI polls each frame.
 
-use am_workspace::model::*;
+use crate::model::*;
 use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
@@ -197,7 +197,7 @@ fn put_wrapped<B, T, W>(
             return;
         }
     };
-    let mut request = ehttp::Request::new(path, body_json);
+    let mut request = ehttp::Request::post(path, body_json);
     request.method = "PUT".to_string();
     request
         .headers

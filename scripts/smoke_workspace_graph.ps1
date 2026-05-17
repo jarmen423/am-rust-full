@@ -24,7 +24,7 @@ if (-not $ExePath) {
 }
 
 if (-not (Test-Path -LiteralPath $ExePath)) {
-    throw "workspace-server not found. Build first:`n  pwsh -File scripts/build_workspace_server.ps1`n  or: cargo build --bin workspace-server`n  (shim-only: add --no-default-features)"
+    throw "workspace-server not found. Build first:`n  pwsh -File scripts/build_workspace_server.ps1`n  or: cargo build --bin workspace-server`n  (shim Ladybug: --no-default-features --features server)"
 }
 
 $env:PORT = "$Port"

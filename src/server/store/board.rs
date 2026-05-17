@@ -6,6 +6,15 @@ use chrono::Utc;
 use serde_json;
 use uuid::Uuid;
 
+/// Metadata sent with `PUT /boards/{id}` beyond title / tldraw / geometry.
+#[derive(Debug, Clone, Default)]
+pub struct BoardUpdateMeta {
+    pub workspace_id: String,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub board_state: Option<String>,
+}
+
 /// Create a new board with default empty state.
 pub fn create_board(
     store_root: &str,
@@ -64,6 +73,7 @@ pub fn update_board(
     tldraw_document: serde_json::Value,
     objects: Vec<WorkspaceBoardObject>,
     connectors: Vec<WorkspaceConnector>,
+    meta: BoardUpdateMeta,
 ) -> Result<WorkspaceBoard, String> {
     // Find the board by scanning all workspace directories
     let mut board = None;
@@ -84,6 +94,21 @@ pub fn update_board(
                 b.connectors = connectors;
                 b.object_count = b.objects.len() as i32;
                 b.connector_count = b.connectors.len() as i32;
+                if !meta.workspace_id.is_empty() && meta.workspace_id != b.workspace_id {
+                    return Err(format!(
+                        "workspace_id mismatch: board is in {}, request specified {}",
+                        b.workspace_id, meta.workspace_id
+                    ));
+                }
+                if let Some(description) = meta.description {
+                    b.description = Some(description);
+                }
+                if let Some(tags) = meta.tags {
+                    b.tags = tags;
+                }
+                if let Some(board_state) = meta.board_state {
+                    b.board_state = board_state;
+                }
                 b.updated_at = Utc::now();
                 board = Some((b, ws_id));
                 break;
@@ -271,6 +296,7 @@ mod tests {
             tldraw.clone(),
             vec![],
             vec![],
+            BoardUpdateMeta::default(),
         )
         .unwrap();
         assert_eq!(updated.title, "Updated Tldraw Board");
@@ -330,6 +356,7 @@ mod tests {
             serde_json::json!({}),
             objects,
             connectors,
+            BoardUpdateMeta::default(),
         )
         .unwrap();
         assert_eq!(updated.object_count, 1);

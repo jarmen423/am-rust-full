@@ -7,7 +7,7 @@ use crate::api;
 use crate::canvas::{self, CanvasOutput, CanvasState};
 use crate::editor::{self, EditorOutput, EditorState, SaveRequest};
 use crate::sidebar::{self, SidebarOutput, SidebarState};
-use am_workspace::model::{WorkspaceNoteDocument, WorkspaceBoard, NoteHistoryItem};
+use crate::model::{NoteHistoryItem, WorkspaceBoard, WorkspaceNoteDocument};
 use egui::Context;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -161,8 +161,11 @@ impl WorkspaceApp {
 
         // ── Create note ───────────────────────────────────────────────
         {
-            let mut lock = self.create_promise.lock();
-            if let Some(note) = lock.take() {
+            let note_done = {
+                let mut lock = self.create_promise.lock();
+                lock.take()
+            };
+            if let Some(note) = note_done {
                 self.notes.push(note.clone());
                 self.sidebar.select_note(&note.note_id);
                 self.editor.load_note(&note);
@@ -194,8 +197,11 @@ impl WorkspaceApp {
 
         // ── Revert ────────────────────────────────────────────────────
         {
-            let mut lock = self.revert_promise.lock();
-            if let Some(note) = lock.take() {
+            let note_done = {
+                let mut lock = self.revert_promise.lock();
+                lock.take()
+            };
+            if let Some(note) = note_done {
                 self.editor.load_note(&note);
                 if let Some(idx) = self.notes.iter().position(|n| n.note_id == note.note_id) {
                     self.notes[idx] = note;
@@ -291,7 +297,7 @@ impl eframe::App for WorkspaceApp {
         // ── Apply theme ───────────────────────────────────────────────
         #[cfg(feature = "egui")]
         {
-            let style = am_workspace::theme::agentic_style();
+            let style = crate::theme::agentic_style();
             ctx.set_style(style);
         }
 

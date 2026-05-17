@@ -4,7 +4,8 @@ use crate::canvas::camera::Camera;
 use crate::model::{CanvasConnector, CanvasObject};
 use crate::theme::color32;
 use crate::theme::palette;
-use egui::{Color32, CubicBezierShape, Pos2, QuadraticBezierShape, Shape, Stroke, Ui, Vec2};
+use egui::epaint::{CubicBezierShape, QuadraticBezierShape};
+use egui::{Color32, Pos2, Shape, Stroke, Ui, Vec2};
 
 /// Render a connector between two cards as a cubic Bezier curve.
 ///

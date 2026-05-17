@@ -1,6 +1,6 @@
 //! Sidebar panel — note list, search, and navigation.
 
-use am_workspace::model::{WorkspaceBoard, WorkspaceNoteDocument};
+use crate::model::{WorkspaceBoard, WorkspaceNoteDocument};
 use egui::{RichText, ScrollArea, TextEdit, Ui};
 
 /// Mutable state for the sidebar.
@@ -182,10 +182,10 @@ pub fn show(
                     ui.visuals().extreme_bg_color
                 };
 
-                let response = egui::Frame::new()
+                let response = egui::Frame::none()
                     .fill(bg)
-                    .inner_margin(egui::Margin::symmetric(8, 6))
-                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                    .rounding(4.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
@@ -307,10 +307,10 @@ pub fn show(
                 ui.visuals().extreme_bg_color
             };
 
-            let response = egui::Frame::new()
+            let response = egui::Frame::none()
                 .fill(bg)
-                .inner_margin(egui::Margin::symmetric(8, 6))
-                .corner_radius(4.0)
+                .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                .rounding(4.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {

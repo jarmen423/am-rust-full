@@ -172,6 +172,12 @@ pub async fn update_board(
         req.tldraw_document,
         req.objects,
         req.connectors,
+        store::BoardUpdateMeta {
+            workspace_id: req.workspace_id.clone(),
+            description: req.description.clone(),
+            tags: req.tags.clone(),
+            board_state: req.board_state.clone(),
+        },
     ) {
         Ok(board) => {
             info!(board_id = %id, "board updated");
@@ -190,45 +196,52 @@ pub async fn update_board(
     }
 }
 
-/// Ingest an entire board into the graph (stub — returns mock payload).
-#[instrument(skip(_state, req))]
+/// Ingest an entire board — persists an ingest receipt under the workspace vault.
+#[instrument(skip(state, req))]
 pub async fn ingest_board(
-    State(_state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<WorkspaceState>>,
     Path(id): Path<String>,
     Json(req): Json<IngestBoardRequest>,
 ) -> Json<serde_json::Value> {
-    info!(board_id = %id, "ingesting board (stub)");
+    let workspace_id = req.workspace_id.as_str();
 
-    let ingest = WorkspaceIngestPayload {
-        ingest_id: "stub".to_string(),
-        ingest_scope: "board".to_string(),
-        board_id: id,
-        workspace_id: req.workspace_id,
-        project_id: None,
-        title: "Stub Ingest".to_string(),
-        summary: String::new(),
-        tags: vec![],
-        maturity: "draft".to_string(),
-        object_ids: vec![],
-        connector_ids: vec![],
-        object_count: 0,
-        connector_count: 0,
-        entity_count: 0,
-        relation_count: 0,
-        graph_status: "stub".to_string(),
-        ingested_at: chrono::Utc::now(),
+    let title = match store::get_board(&state.config.store_path, workspace_id, &id) {
+        Ok(Some(b)) => b.title,
+        Ok(None) => {
+            warn!(board_id = %id, "ingest: board not found");
+            return Json(serde_json::json!({
+                "status": "error",
+                "message": "board not found"
+            }));
+        }
+        Err(e) => {
+            error!(error = %e, "ingest: failed to load board");
+            return Json(serde_json::json!({
+                "status": "error",
+                "message": e
+            }));
+        }
     };
 
-    Json(serde_json::json!({
-        "status": "ok",
-        "ingest": ingest
-    }))
+    match store::ingest_board(&state.config.store_path, workspace_id, &id, &title) {
+        Ok(ingest) => Json(serde_json::json!({
+            "status": "ok",
+            "ingest": ingest
+        })),
+        Err(e) => {
+            error!(error = %e, "ingest_board failed");
+            Json(serde_json::json!({
+                "status": "error",
+                "message": e
+            }))
+        }
+    }
 }
 
-/// Ingest a selection of objects/connectors from a board (stub).
-#[instrument(skip(_state, req))]
+/// Ingest a selection of objects/connectors from a board.
+#[instrument(skip(state, req))]
 pub async fn ingest_selection(
-    State(_state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<WorkspaceState>>,
     Path(id): Path<String>,
     Json(req): Json<IngestSelectionRequest>,
 ) -> Json<serde_json::Value> {
@@ -236,33 +249,37 @@ pub async fn ingest_selection(
         board_id = %id,
         object_count = req.object_ids.len(),
         connector_count = req.connector_ids.len(),
-        "ingesting selection (stub)"
+        "ingesting selection"
     );
 
-    let ingest = WorkspaceIngestPayload {
-        ingest_id: "stub".to_string(),
-        ingest_scope: "selection".to_string(),
-        board_id: id,
-        workspace_id: req.workspace_id,
-        project_id: None,
-        title: "Stub Selection Ingest".to_string(),
-        summary: String::new(),
-        tags: vec![],
-        maturity: "draft".to_string(),
-        object_ids: req.object_ids,
-        connector_ids: req.connector_ids,
-        object_count: 0,
-        connector_count: 0,
-        entity_count: 0,
-        relation_count: 0,
-        graph_status: "stub".to_string(),
-        ingested_at: chrono::Utc::now(),
-    };
+    let workspace_id = req.workspace_id.as_str();
+    let title = format!(
+        "Selection on board {} ({} objects, {} connectors)",
+        id,
+        req.object_ids.len(),
+        req.connector_ids.len()
+    );
 
-    Json(serde_json::json!({
-        "status": "ok",
-        "ingest": ingest
-    }))
+    match store::ingest_selection(
+        &state.config.store_path,
+        workspace_id,
+        &id,
+        &title,
+        req.object_ids.clone(),
+        req.connector_ids.clone(),
+    ) {
+        Ok(ingest) => Json(serde_json::json!({
+            "status": "ok",
+            "ingest": ingest
+        })),
+        Err(e) => {
+            error!(error = %e, "ingest_selection failed");
+            Json(serde_json::json!({
+                "status": "error",
+                "message": e
+            }))
+        }
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────

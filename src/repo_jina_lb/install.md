@@ -86,6 +86,14 @@ If none match, stderr prints **`scip: skipped`** (no SILENT noop). Prefer **`--s
 
 Then either rely on that discovery or pass **`--scip D:\path\to\index.scip`**. See **[`jina-embeddings.md`](../../jina-embeddings.md)** in this workspace for semantics and limitations.
 
+## Windows **`scip-python`** and merged multi-language SCIP
+
+If you maintain the separate **`ladybug-jina`** workspace (**`build_merged_scip.ps1`**, **`patch_scip_python_windows.ps1`**, **`merge-scip`** cookbooks), use its **`install.md`** as the full reference:
+
+- **Upstream**: global **`@sourcegraph/scip-python`** startup crash — **[Issue #210](https://github.com/sourcegraph/scip-python/issues/210)**; proposed source fix (**open PR**) — **[PR #211](https://github.com/sourcegraph/scip-python/pull/211)**. Prefer commenting / reviewing **#211** rather than filing duplicate bugs.
+- **Scripts**: **`build_merged_scip.ps1`** accepts **`-LadybugJinaRoot`**. **`patch_scip_python_windows.ps1`** does **not** — only **`BundlePath`** / **`DryRunNode`**. Passing **`-LadybugJinaRoot`** to the patch script yields *parameter cannot be found*.
+- Re-patch after each **`npm install -g @sourcegraph/scip-python`** ( **`dist/`** is overwritten).
+
 ## Embedding dimension
 
 `--dimensions` must match the `Chunk.embedding FLOAT[N]` DDL created at `--init-schema`. Changing width later requires a new DB or migration. Maximum dense width for `jina-embeddings-v4` in this profile is **2048** (`schema_ddl::JINA_EMBED_DIM_V4_MAX`).

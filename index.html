@@ -6,8 +6,8 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <title>Agentic Memory Workspace</title>
 
-    <!-- Trunk: compile the Rust library as WASM -->
-    <link data-trunk rel="rust" data-type="main" />
+    <!-- Trunk: WASM entry lives on the `am_workspace` cdylib (`wasm_bindgen` in lib.rs), not `workspace-app`. -->
+    <link data-trunk rel="rust" data-type="main" data-target-name="am_workspace" />
 
     <style>
         html, body {

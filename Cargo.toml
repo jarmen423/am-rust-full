@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "workspace-server"
 path = "src/server/main.rs"
+required-features = ["server"]
 
 [[bin]]
 name = "workspace-app"
@@ -21,9 +22,25 @@ name = "jina-ladybug-repo-index"
 path = "src/bin/jina_ladybug_repo_index.rs"
 required-features = ["jina-ladybug-index"]
 
+[[bin]]
+name = "lbug-quick-audit"
+path = "src/bin/lbug_quick_audit.rs"
+required-features = ["ladybug"]
+
 [features]
-default = ["ladybug"]
+# `server`: Axum/Tokio/Git2 stack — not WASM-safe (pulls `mio`). Omit for Trunk/WASM (`--no-default-features --features egui`).
+default = ["ladybug", "server"]
 ladybug = ["dep:lbug"]
+server = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:git2",
+    "dep:uuid",
+]
 jina-ladybug-index = [
     "ladybug",
     "dep:clap",
@@ -47,20 +64,21 @@ egui = [
     "dep:wasm-bindgen-futures",
     "dep:console_error_panic_hook",
     "dep:parking_lot",
+    "dep:uuid",
 ]
 
 [dependencies]
-axum = "0.8"
-tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", optional = true, features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-git2 = "0.20"
+git2 = { version = "0.20", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "js"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", optional = true, features = ["fs", "cors", "trace"] }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
 lbug = { version = "0.16.1", optional = true }
 
 # Frontend dependencies (gated behind egui feature)
@@ -85,6 +103,10 @@ tree-sitter-javascript = { version = "0.23", optional = true }
 tree-sitter-python = { version = "0.23", optional = true }
 tree-sitter-rust = { version = "0.23", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
+
+# Used by the WASM entrypoint to resolve `#canvas` for `eframe::WebRunner::start`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Document", "Element", "HtmlCanvasElement", "Window"] }
 
 [dev-dependencies]
 tempfile = "3"

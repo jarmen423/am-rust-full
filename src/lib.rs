@@ -29,17 +29,28 @@ pub mod sidebar;
 #[cfg(all(feature = "egui", target_arch = "wasm32"))]
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
+    use wasm_bindgen::JsCast;
+
     console_error_panic_hook::set_once();
 
     let web_options = eframe::WebOptions::default();
 
     wasm_bindgen_futures::spawn_local(async move {
+        let document = web_sys::window()
+            .expect("no window")
+            .document()
+            .expect("no document");
+        let canvas = document
+            .get_element_by_id("canvas")
+            .expect("missing #canvas in index.html")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("#canvas must be an HtmlCanvasElement");
+
         eframe::WebRunner::new()
             .start(
-                "canvas", // <canvas> element id in index.html
+                canvas,
                 web_options,
                 Box::new(|cc| {
-                    // Apply the Agentic Memory theme
                     let style = theme::agentic_style();
                     cc.egui_ctx.set_style(style);
                     Ok(Box::new(app::WorkspaceApp::new(cc)))

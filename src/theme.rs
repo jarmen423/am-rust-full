@@ -87,7 +87,7 @@ pub fn agentic_style() -> egui::Style {
         FontId::new(12.0, egui::FontFamily::Proportional),
     );
 
-    style.spacing.window_margin = egui::Margin::same(12);
+    style.spacing.window_margin = egui::Margin::same(12.0);
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(12.0, 6.0);
 

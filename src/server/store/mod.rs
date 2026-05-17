@@ -5,6 +5,4 @@ pub mod note;
 pub mod vault;
 
 pub use board::*;
-pub use git::*;
 pub use note::*;
-pub use vault::*;

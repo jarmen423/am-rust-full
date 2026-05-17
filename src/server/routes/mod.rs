@@ -3,11 +3,9 @@ pub mod graph;
 pub mod notes;
 
 use axum::{
-    extract::{Path, State},
-    routing::{get, post, put},
-    Json, Router,
+    routing::{get, post},
+    Router,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::config::ServerConfig;

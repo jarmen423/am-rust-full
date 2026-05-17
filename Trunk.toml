@@ -1,0 +1,11 @@
+# WASM target cannot compile the `server` stack (`tokio` → `mio`). Cargo unifies
+# features across the package, so defaults (`ladybug`, `server`) must be off for
+# `wasm32-unknown-unknown` builds — enable only `egui` here.
+#
+# Then: `trunk build --release` (no extra flags required).
+
+[build]
+target = "index.html"
+dist = "dist"
+no_default_features = true
+features = ["egui"]

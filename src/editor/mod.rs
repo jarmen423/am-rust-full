@@ -1,6 +1,6 @@
 //! Note editor panel — title, tags, markdown body, save, history.
 
-use am_workspace::model::{NoteHistoryItem, WorkspaceNoteDocument};
+use crate::model::{NoteHistoryItem, WorkspaceNoteDocument};
 use egui::{RichText, ScrollArea, TextEdit, Ui};
 
 /// Mutable state for the note editor.
