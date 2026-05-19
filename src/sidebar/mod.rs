@@ -360,6 +360,18 @@ pub fn show(
         }
     }
 
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(4.0);
+
+    ui.horizontal(|ui| {
+        ui.heading(RichText::new("Views").size(16.0));
+    });
+    ui.add_space(4.0);
+    if ui.button("Graph Explorer").clicked() {
+        output.open_graph = true;
+    }
+
     output
 }
 
@@ -378,4 +390,6 @@ pub struct SidebarOutput {
     pub board_deselected: bool,
     /// User wants to create a board with this title.
     pub create_board_title: Option<String>,
+    /// User opened the graph explorer view.
+    pub open_graph: bool,
 }

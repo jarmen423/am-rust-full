@@ -57,7 +57,7 @@ pub async fn bootstrap(
                 notes: true,
                 boards: true,
                 connectors: true,
-                graph_view: false, // Phase 4
+                graph_view: true,
                 manual_ingest: true,
                 auto_ingest: false,
             },

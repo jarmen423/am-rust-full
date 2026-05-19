@@ -20,6 +20,8 @@ pub enum Edge {
 pub struct CardInteraction {
     /// True if the card was clicked this frame.
     pub clicked: bool,
+    /// True if the card was double-clicked this frame.
+    pub double_clicked: bool,
     /// If the card is being dragged, the delta in **world** space.
     pub dragged: Option<Vec2>,
     /// Which edge the pointer is hovering over.
@@ -181,6 +183,7 @@ pub fn render_card(
     let response = ui.interact(rect, ui.id().with(&obj.id), egui::Sense::click_and_drag());
 
     interaction.clicked = response.clicked();
+    interaction.double_clicked = response.double_clicked();
     if response.dragged() {
         interaction.dragged = Some(response.drag_delta() / camera.zoom);
     }

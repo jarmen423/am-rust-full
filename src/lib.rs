@@ -20,6 +20,8 @@ pub mod canvas;
 #[cfg(feature = "egui")]
 pub mod editor;
 #[cfg(feature = "egui")]
+pub mod graph_view;
+#[cfg(feature = "egui")]
 pub mod sidebar;
 
 // ── WASM entry point ─────────────────────────────────────────────────

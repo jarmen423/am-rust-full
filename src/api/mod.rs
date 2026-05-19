@@ -390,7 +390,9 @@ pub fn save_board(
         workspace_id: String,
         title: String,
         tldraw_document: serde_json::Value,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         objects: Vec<crate::model::WorkspaceBoardObject>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         connectors: Vec<crate::model::WorkspaceConnector>,
         description: Option<String>,
         tags: Option<Vec<String>>,
@@ -448,4 +450,116 @@ pub fn create_board(
         ctx,
         |resp: BoardResp| resp.board,
     );
+}
+
+// ── Graph API ──────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct GraphExploreResp {
+    #[allow(dead_code)]
+    status: String,
+    seed: crate::model::WorkspaceGraphSeed,
+    nodes: Vec<crate::model::WorkspaceGraphNode>,
+    edges: Vec<crate::model::WorkspaceGraphEdge>,
+}
+
+/// Fetch the workspace explore graph.
+pub fn fetch_graph_explore(
+    state: SharedPromise<crate::model::GraphResponse>,
+    ctx: &egui::Context,
+) {
+    get_wrapped(
+        "/api/workspace/graph/explore",
+        state,
+        ctx,
+        |resp: GraphExploreResp| crate::model::GraphResponse {
+            status: resp.status,
+            seed: resp.seed,
+            nodes: resp.nodes,
+            edges: resp.edges,
+        },
+    );
+}
+
+/// Fetch the subgraph for a note.
+pub fn fetch_graph_note(
+    note_id: &str,
+    state: SharedPromise<crate::model::GraphResponse>,
+    ctx: &egui::Context,
+) {
+    get_wrapped(
+        &format!("/api/workspace/graph/notes/{note_id}"),
+        state,
+        ctx,
+        |resp: GraphExploreResp| crate::model::GraphResponse {
+            status: resp.status,
+            seed: resp.seed,
+            nodes: resp.nodes,
+            edges: resp.edges,
+        },
+    );
+}
+
+/// Fetch the subgraph for a board.
+pub fn fetch_graph_board(
+    board_id: &str,
+    state: SharedPromise<crate::model::GraphResponse>,
+    ctx: &egui::Context,
+) {
+    get_wrapped(
+        &format!("/api/workspace/graph/boards/{board_id}"),
+        state,
+        ctx,
+        |resp: GraphExploreResp| crate::model::GraphResponse {
+            status: resp.status,
+            seed: resp.seed,
+            nodes: resp.nodes,
+            edges: resp.edges,
+        },
+    );
+}
+
+/// Search graph picker items.
+pub fn fetch_graph_picker(
+    query: &str,
+    state: SharedPromise<Vec<serde_json::Value>>,
+    ctx: &egui::Context,
+) {
+    let path = if query.is_empty() {
+        "/api/workspace/graph/picker".to_string()
+    } else {
+        format!("/api/workspace/graph/picker?q={}", urlencoding(query))
+    };
+    *state.lock() = Promise::Pending;
+    let request = ehttp::Request::get(&path);
+    let ctx = ctx.clone();
+    ehttp::fetch(request, move |result| {
+        *state.lock() = match result {
+            Ok(response) if response.ok => {
+                match serde_json::from_slice::<serde_json::Value>(&response.bytes) {
+                    Ok(json) => {
+                        let items = json
+                            .get("items")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        Promise::Ready(items)
+                    }
+                    Err(e) => Promise::Failed(format!("JSON parse: {e}")),
+                }
+            }
+            Ok(response) => Promise::Failed(format!("HTTP {}", response.status)),
+            Err(e) => Promise::Failed(e),
+        };
+        ctx.request_repaint();
+    });
+}
+
+fn urlencoding(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            _ => format!("%{:02X}", c as u8),
+        })
+        .collect()
 }

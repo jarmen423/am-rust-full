@@ -1,9 +1,4 @@
 //! Infinite canvas — pan, zoom, select, drag, connect, and create note cards.
-//!
-//! The canvas is an infinite 2D workspace where cards (note cards, text cards,
-//! graph references) can be placed, dragged, and connected with directional
-//! edges.  The viewport is controlled by a [`Camera`] that maps between
-//! screen and world space.
 
 pub mod camera;
 pub mod card;
@@ -17,11 +12,21 @@ use crate::model::{
 use crate::theme::color32;
 use crate::theme::palette;
 use camera::Camera;
-use card::render_card;
+use card::{render_card, Edge};
 use connector::{render_connector, render_connection_preview};
 use egui::{Pos2, Ui, Vec2};
 use std::collections::HashMap;
 use tools::CanvasTool;
+
+const SAVE_DEBOUNCE_SECS: f32 = 2.0;
+const MIN_CARD_SIZE: f32 = 120.0;
+
+/// Content-only snapshot for undo (camera changes are excluded).
+#[derive(Debug, Clone)]
+struct CanvasUndoEntry {
+    objects: HashMap<String, crate::model::CanvasObject>,
+    connectors: HashMap<String, CanvasConnector>,
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CanvasState
@@ -29,28 +34,23 @@ use tools::CanvasTool;
 
 /// Mutable state for the infinite canvas.
 pub struct CanvasState {
-    /// Viewport camera (pan + zoom).
     pub camera: Camera,
-    /// Currently active tool.
     pub tool: CanvasTool,
-    /// ID of the selected card (if any).
     pub selected_object_id: Option<String>,
-    /// Loaded board document (cards + connectors).
+    pub selected_connector_id: Option<String>,
     pub canvas_doc: Option<WorkspaceCanvasDocument>,
-    /// ID of the currently loaded board.
     pub board_id: Option<String>,
-    /// True while the user is middle-mouse or space-drag panning.
     pub is_panning: bool,
-    /// Pointer position from the previous frame (screen space).
     pub last_pointer_pos: Option<Pos2>,
-    /// Pointer position where a drag started (screen space).
     pub drag_start: Option<Pos2>,
-    /// Object ID we started a connection drag from.
     pub connecting_from: Option<String>,
-    /// True when the document has unsaved changes.
     pub dirty: bool,
-    /// Transient status message with remaining display time.
     pub status_message: Option<(String, f32)>,
+    undo_stack: Vec<CanvasUndoEntry>,
+    pub save_debounce: f32,
+    pub resize_target: Option<(String, Edge)>,
+    pub save_in_flight: bool,
+    pub drag_mutation_started: bool,
 }
 
 impl Default for CanvasState {
@@ -60,12 +60,12 @@ impl Default for CanvasState {
 }
 
 impl CanvasState {
-    /// Create a new canvas with default camera and no board loaded.
     pub fn new() -> Self {
         Self {
             camera: Camera::new(),
             tool: CanvasTool::default(),
             selected_object_id: None,
+            selected_connector_id: None,
             canvas_doc: None,
             board_id: None,
             is_panning: false,
@@ -74,14 +74,14 @@ impl CanvasState {
             connecting_from: None,
             dirty: false,
             status_message: None,
+            undo_stack: Vec::new(),
+            save_debounce: 0.0,
+            resize_target: None,
+            save_in_flight: false,
+            drag_mutation_started: false,
         }
     }
 
-    /// Load a [`WorkspaceBoard`] into the canvas.
-    ///
-    /// Attempts to parse the board's `tldraw_document` JSON into a
-    /// [`WorkspaceCanvasDocument`].  If parsing fails, an empty document
-    /// is created.
     pub fn load_board(&mut self, board: &WorkspaceBoard) {
         self.board_id = Some(board.board_id.clone());
 
@@ -100,16 +100,17 @@ impl CanvasState {
                 }
             });
 
-        // Sync camera from document
         self.camera = Camera::from_model_camera(&doc.camera);
         self.canvas_doc = Some(doc);
         self.selected_object_id = None;
+        self.selected_connector_id = None;
         self.dirty = false;
+        self.undo_stack.clear();
+        self.save_debounce = 0.0;
+        self.save_in_flight = false;
+        self.drag_mutation_started = false;
     }
 
-    /// Serialize the current canvas state into a [`WorkspaceCanvasDocument`].
-    ///
-    /// Returns `None` if no board is loaded.
     pub fn save_document(&self) -> Option<WorkspaceCanvasDocument> {
         self.canvas_doc.as_ref().map(|doc| {
             let mut doc = doc.clone();
@@ -118,9 +119,6 @@ impl CanvasState {
         })
     }
 
-    /// Fade the status message over time.
-    ///
-    /// Call once per frame with the frame delta time.
     pub fn tick_status(&mut self, dt: f32) {
         if let Some((_, ref mut remaining)) = self.status_message {
             *remaining -= dt;
@@ -128,54 +126,124 @@ impl CanvasState {
                 self.status_message = None;
             }
         }
+
+        if self.dirty && !self.save_in_flight && self.save_debounce > 0.0 {
+            self.save_debounce -= dt;
+        }
     }
 
-    /// Show a transient status message.
+    pub fn save_debounce_elapsed(&self) -> bool {
+        self.dirty && !self.save_in_flight && self.save_debounce <= 0.0
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.dirty = false;
+        self.save_debounce = 0.0;
+        self.save_in_flight = false;
+    }
+
+    pub fn begin_save(&mut self) {
+        self.save_in_flight = true;
+    }
+
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = Some((msg.into(), 3.0));
     }
+
+    fn push_undo_snapshot(&mut self, doc: &WorkspaceCanvasDocument) {
+        self.undo_stack.push(CanvasUndoEntry {
+            objects: doc.objects.clone(),
+            connectors: doc.connectors.clone(),
+        });
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn undo_doc(&mut self, doc: &mut WorkspaceCanvasDocument) {
+        let Some(entry) = self.undo_stack.pop() else {
+            self.set_status("Nothing to undo");
+            return;
+        };
+        doc.objects = entry.objects;
+        doc.connectors = entry.connectors;
+        self.mark_dirty();
+        self.set_status("Undone");
+    }
+
+    fn delete_selection_in_doc(&mut self, doc: &mut WorkspaceCanvasDocument) {
+        if let Some(conn_id) = self.selected_connector_id.take() {
+            self.push_undo_snapshot(doc);
+            doc.connectors.remove(&conn_id);
+            self.mark_dirty();
+            self.set_status("Connector deleted");
+            return;
+        }
+
+        let Some(obj_id) = self.selected_object_id.take() else {
+            return;
+        };
+
+        self.push_undo_snapshot(doc);
+        doc.objects.remove(&obj_id);
+        doc.connectors
+            .retain(|_, c| c.from_object_id != obj_id && c.to_object_id != obj_id);
+        self.mark_dirty();
+        self.set_status("Card deleted");
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.save_debounce = SAVE_DEBOUNCE_SECS;
+    }
+
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CanvasOutput
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Actions produced by the canvas UI.
 #[derive(Debug, Default)]
 pub struct CanvasOutput {
-    /// Request to save the board with this document.
     pub save_board: Option<(String, WorkspaceCanvasDocument)>,
-    /// Request to create a new note at this world position.
     pub create_note_at: Option<Pos2>,
-    /// Board document was modified (dirty flag).
+    pub open_note_id: Option<String>,
     pub dirty: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// show() — main entry point
+// show()
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Render the infinite canvas and process all interactions.
-///
-/// Returns a [`CanvasOutput`] describing actions the caller should perform
-/// (save requests, note creation, etc.).
 pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
     let mut output = CanvasOutput::default();
-    let rect = ui.max_rect();
 
-    // ── 0. No board loaded — show placeholder ─────────────────────────
-    let Some(ref mut doc) = state.canvas_doc else {
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() / 2.0 - 10.0);
-            ui.label(
-                egui::RichText::new("Select a board from the sidebar")
-                    .color(ui.visuals().weak_text_color()),
-            );
-        });
-        return output;
+    render_toolbar(ui, state, &mut output);
+
+    let mut doc = match state.canvas_doc.take() {
+        Some(doc) => doc,
+        None => {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() / 2.0 - 10.0);
+                ui.label(
+                    egui::RichText::new("Select a board from the sidebar")
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
+            return output;
+        }
     };
 
-    // ── 1. Background input (pan, zoom) ──────────────────────────────
+    let rect = ui.max_rect();
+
+    if ui.input(|i| i.modifiers.command || i.modifiers.ctrl) && ui.input(|i| i.key_pressed(egui::Key::Z))
+    {
+        state.undo_doc(&mut doc);
+    }
+    if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+        state.delete_selection_in_doc(&mut doc);
+    }
+
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let scroll_delta = ui.input(|i| i.raw_scroll_delta);
     let ctrl_down = ui.input(|i| i.modifiers.ctrl);
@@ -183,19 +251,16 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
     let middle_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle));
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
-    // Ctrl + wheel → zoom at cursor
     if ctrl_down && scroll_delta.y != 0.0 {
         let factor = if scroll_delta.y > 0.0 { 1.1 } else { 0.9 };
         let anchor = pointer.unwrap_or(rect.center());
         state.camera.zoom_at(factor, anchor, &rect);
     }
 
-    // Middle-mouse drag or Space+drag → pan
     if middle_down || (space_down && state.is_panning) {
         if let Some(prev) = state.last_pointer_pos {
             if let Some(curr) = pointer {
-                let delta = curr - prev;
-                state.camera.pan(delta);
+                state.camera.pan(curr - prev);
             }
         }
         state.is_panning = true;
@@ -203,7 +268,6 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
         state.is_panning = false;
     }
 
-    // Pan tool — left-drag on background pans
     if state.tool == CanvasTool::Pan {
         let bg_sense = ui.interact(rect, ui.id().with("canvas_bg"), egui::Sense::drag());
         if bg_sense.dragged() {
@@ -211,14 +275,14 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
         }
     }
 
-    // ── 2. Render grid ────────────────────────────────────────────────
     render_grid(ui, &state.camera);
 
-    // ── 3. Collect card interactions ──────────────────────────────────
     let mut hovered_object_id: Option<String> = None;
     let mut clicked_object_id: Option<String> = None;
+    let mut double_clicked_note_id: Option<String> = None;
     let mut dragged_object_id: Option<(String, Vec2)> = None;
     let mut drag_started_on_card = false;
+    let mut resize_edge: Option<(String, Edge)> = None;
 
     let object_ids: Vec<String> = doc.objects.keys().cloned().collect();
 
@@ -227,17 +291,21 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
         let Some(obj) = obj else { continue };
 
         let is_selected = state.selected_object_id.as_ref() == Some(obj_id);
-        let is_hovered = state.selected_object_id.as_ref() == Some(obj_id);
+        let is_hovered = hovered_object_id.as_ref() == Some(obj_id) || is_selected;
 
         let interaction = render_card(ui, &obj, &state.camera, is_selected, is_hovered);
 
-        if interaction.hover_edge.is_some() || interaction.pointer_pos.map_or(false, |p| {
-            let w = if obj.w > 0.0 { obj.w } else { crate::model::NOTE_CARD_WIDTH };
-            let h = if obj.h > 0.0 { obj.h } else { crate::model::NOTE_CARD_HEIGHT };
-            let screen_pos = state.camera.world_to_screen(Pos2::new(obj.x, obj.y), &rect);
-            let card_rect = egui::Rect::from_min_size(screen_pos, Vec2::new(w * state.camera.zoom, h * state.camera.zoom));
-            card_rect.contains(p)
-        }) {
+        let w = if obj.w > 0.0 { obj.w } else { crate::model::NOTE_CARD_WIDTH };
+        let h = if obj.h > 0.0 { obj.h } else { crate::model::NOTE_CARD_HEIGHT };
+        let screen_pos = state.camera.world_to_screen(Pos2::new(obj.x, obj.y), &rect);
+        let card_rect = egui::Rect::from_min_size(
+            screen_pos,
+            Vec2::new(w * state.camera.zoom, h * state.camera.zoom),
+        );
+
+        if interaction.hover_edge.is_some()
+            || interaction.pointer_pos.map_or(false, |p| card_rect.contains(p))
+        {
             hovered_object_id = Some(obj_id.clone());
         }
 
@@ -245,29 +313,65 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
             clicked_object_id = Some(obj_id.clone());
         }
 
+        if interaction.double_clicked {
+            if let Some(ref note_id) = obj.note_id {
+                double_clicked_note_id = Some(note_id.clone());
+            }
+        }
+
         if let Some(drag_delta) = interaction.dragged {
-            dragged_object_id = Some((obj_id.clone(), drag_delta));
-            drag_started_on_card = true;
+            if is_selected && interaction.hover_edge.is_some() {
+                resize_edge = Some((obj_id.clone(), interaction.hover_edge.unwrap()));
+            } else {
+                dragged_object_id = Some((obj_id.clone(), drag_delta));
+                drag_started_on_card = true;
+            }
         }
     }
 
-    // ── 4. Render connectors ──────────────────────────────────────────
+    // Connector rendering + hit testing
     let connector_ids: Vec<String> = doc.connectors.keys().cloned().collect();
     for conn_id in &connector_ids {
         let conn = doc.connectors.get(conn_id).cloned();
         let Some(ref conn) = conn else { continue };
-        let Some(ref from_obj) = doc.objects.get(&conn.from_object_id).cloned() else { continue };
-        let Some(ref to_obj) = doc.objects.get(&conn.to_object_id).cloned() else { continue };
+        let Some(ref from_obj) = doc.objects.get(&conn.from_object_id).cloned() else {
+            continue;
+        };
+        let Some(ref to_obj) = doc.objects.get(&conn.to_object_id).cloned() else {
+            continue;
+        };
         render_connector(ui, conn, from_obj, to_obj, &state.camera);
+
+        if state.tool == CanvasTool::Select {
+            if let Some(p) = pointer {
+                let from_screen =
+                    state.camera.world_to_screen(Pos2::new(from_obj.x, from_obj.y), &rect);
+                let to_screen =
+                    state.camera.world_to_screen(Pos2::new(to_obj.x, to_obj.y), &rect);
+                let mid = Pos2::new(
+                    (from_screen.x + to_screen.x) * 0.5,
+                    (from_screen.y + to_screen.y) * 0.5,
+                );
+                if p.distance(mid) < 8.0 {
+                    let hit = ui.interact(
+                        egui::Rect::from_center_size(mid, Vec2::splat(16.0)),
+                        ui.id().with(format!("conn-{conn_id}")),
+                        egui::Sense::click(),
+                    );
+                    if hit.clicked() {
+                        state.selected_connector_id = Some(conn_id.clone());
+                        state.selected_object_id = None;
+                    }
+                }
+            }
+        }
     }
 
-    // ── 5. Handle card interactions ───────────────────────────────────
-
-    // Click → select (Select tool) or start connect (Connect tool)
     if let Some(ref clicked_id) = clicked_object_id {
         match state.tool {
             CanvasTool::Select => {
                 state.selected_object_id = Some(clicked_id.clone());
+                state.selected_connector_id = None;
             }
             CanvasTool::Connect => {
                 state.connecting_from = Some(clicked_id.clone());
@@ -277,28 +381,47 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
         }
     }
 
-    // Drag → move card (Select tool) or preview connection (Connect tool)
     if let Some((ref drag_id, delta)) = dragged_object_id {
         match state.tool {
             CanvasTool::Select => {
-                if let Some(obj) = doc.objects.get_mut(drag_id) {
-                    obj.x += delta.x;
-                    obj.y += delta.y;
-                    state.dirty = true;
+                if let Some((ref obj_id, edge)) = resize_edge.or_else(|| state.resize_target.clone())
+                {
+                    if obj_id == drag_id {
+                        if state.resize_target.is_none() {
+                            state.push_undo_snapshot(&doc);
+                            state.resize_target = Some((obj_id.clone(), edge));
+                        }
+                        if let Some(obj) = doc.objects.get_mut(drag_id) {
+                            apply_resize(obj, edge, delta);
+                            state.mark_dirty();
+                        }
+                    }
+                } else if doc.objects.contains_key(drag_id) {
+                    if !state.drag_mutation_started {
+                        state.push_undo_snapshot(&doc);
+                        state.drag_mutation_started = true;
+                    }
+                    if let Some(obj) = doc.objects.get_mut(drag_id) {
+                        obj.x += delta.x;
+                        obj.y += delta.y;
+                    }
+                    state.mark_dirty();
                 }
             }
-            CanvasTool::Connect => {
-                // Connection drag — draw preview, handled below
-            }
+            CanvasTool::Connect => {}
             _ => {}
         }
     }
 
-    // ── 6. Handle Connect tool drag & release ─────────────────────────
+    if primary_released {
+        state.resize_target = None;
+        state.drag_start = None;
+        state.drag_mutation_started = false;
+    }
+
     if state.tool == CanvasTool::Connect {
         if let Some(ref from_id) = state.connecting_from {
             if drag_started_on_card || state.drag_start.is_some() {
-                // Draw preview from source card to current pointer
                 if let Some(ref from_obj) = doc.objects.get(from_id) {
                     let from_w = if from_obj.w > 0.0 {
                         from_obj.w
@@ -318,26 +441,28 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
                         Vec2::new(from_w * state.camera.zoom, from_h * state.camera.zoom),
                     );
                     let from_mid = from_rect.center();
-
                     let to_screen = pointer.unwrap_or(from_mid);
                     render_connection_preview(ui, from_mid, to_screen, &state.camera);
                 }
             }
 
-            // On release — if hovering a target card, create connector
             if primary_released {
-                if let Some(ref hover_id) = hovered_object_id {
-                    if hover_id != from_id {
-                        let new_conn = CanvasConnector {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            from_object_id: from_id.clone(),
-                            to_object_id: hover_id.clone(),
-                            relation_intent: "related_to".to_string(),
-                            label: String::new(),
-                        };
-                        doc.connectors.insert(new_conn.id.clone(), new_conn);
-                        state.dirty = true;
-                        state.set_status("Connector created");
+                let from_id = state.connecting_from.clone();
+                if let Some(from_id) = from_id {
+                    if let Some(ref hover_id) = hovered_object_id {
+                        if hover_id != &from_id {
+                            state.push_undo_snapshot(&doc);
+                            let new_conn = CanvasConnector {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                from_object_id: from_id,
+                                to_object_id: hover_id.clone(),
+                                relation_intent: "related_to".to_string(),
+                                label: String::new(),
+                            };
+                            doc.connectors.insert(new_conn.id.clone(), new_conn);
+                            state.mark_dirty();
+                            state.set_status("Connector created");
+                        }
                     }
                 }
                 state.connecting_from = None;
@@ -346,40 +471,36 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
         }
     }
 
-    // ── 7. Handle Note tool click on empty space ──────────────────────
     if state.tool == CanvasTool::Note && clicked_object_id.is_none() {
         let bg_clicked = ui.interact(rect, ui.id().with("canvas_bg_click"), egui::Sense::click());
         if bg_clicked.clicked() {
             if let Some(p) = pointer {
-                let world_pos = state.camera.screen_to_world(p, &rect);
-                output.create_note_at = Some(world_pos);
+                output.create_note_at = Some(state.camera.screen_to_world(p, &rect));
                 state.set_status("Creating note…");
             }
         }
     }
 
-    // ── 8. Background click to deselect (Select tool) ─────────────────
     if state.tool == CanvasTool::Select && clicked_object_id.is_none() && !drag_started_on_card {
         let bg_click = ui.interact(rect, ui.id().with("canvas_bg_deselect"), egui::Sense::click());
         if bg_click.clicked() {
             state.selected_object_id = None;
+            state.selected_connector_id = None;
         }
     }
 
-    // ── 9. Update last pointer position ───────────────────────────────
     state.last_pointer_pos = pointer;
 
-    // ── 10. Build output ──────────────────────────────────────────────
     output.dirty = state.dirty;
-    if let Some(ref board_id) = state.board_id {
-        if state.dirty {
-            if let Some(saved_doc) = state.save_document() {
-                output.save_board = Some((board_id.clone(), saved_doc));
-            }
-        }
+    output.open_note_id = double_clicked_note_id;
+
+    doc.camera = state.camera.to_model_camera();
+    state.canvas_doc = Some(doc);
+
+    if state.save_debounce_elapsed() {
+        queue_save(state, &mut output);
     }
 
-    // ── 11. Status message ────────────────────────────────────────────
     if let Some((ref msg, _)) = state.status_message {
         let status_rect = rect.intersect(egui::Rect::from_min_size(
             rect.left_bottom() - Vec2::new(0.0, 30.0),
@@ -397,14 +518,70 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
     output
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Grid rendering
-// ═══════════════════════════════════════════════════════════════════════════
+fn render_toolbar(ui: &mut Ui, state: &mut CanvasState, output: &mut CanvasOutput) {
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut state.tool, CanvasTool::Select, "Select");
+        ui.selectable_value(&mut state.tool, CanvasTool::Pan, "Pan");
+        ui.selectable_value(&mut state.tool, CanvasTool::Connect, "Connect");
+        ui.selectable_value(&mut state.tool, CanvasTool::Note, "Note");
 
-/// Render a subtle dotted-grid pattern in world space.
-///
-/// Dots are placed at 50 px intervals in world space.  Only dots that fall
-/// inside the visible viewport are drawn.
+        ui.separator();
+
+        let save_enabled = state.dirty && !state.save_in_flight;
+        if ui
+            .add_enabled(save_enabled, egui::Button::new("Save"))
+            .clicked()
+        {
+            queue_save(state, output);
+        }
+
+        if state.save_in_flight {
+            ui.label(egui::RichText::new("Saving…").color(color32(palette::TEXT_SECONDARY)));
+        } else if state.dirty {
+            ui.label(
+                egui::RichText::new("● Unsaved changes")
+                    .color(color32(palette::ACCENT_PRIMARY)),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new("Saved")
+                    .color(color32(palette::TEXT_SECONDARY)),
+            );
+        }
+    });
+    ui.separator();
+}
+
+fn queue_save(state: &mut CanvasState, output: &mut CanvasOutput) {
+    if let Some(ref board_id) = state.board_id {
+        if let Some(saved_doc) = state.save_document() {
+            output.save_board = Some((board_id.clone(), saved_doc));
+            state.begin_save();
+        }
+    }
+}
+
+fn apply_resize(obj: &mut crate::model::CanvasObject, edge: Edge, delta: Vec2) {
+    match edge {
+        Edge::Right => {
+            obj.w = (obj.w + delta.x).max(MIN_CARD_SIZE);
+        }
+        Edge::Bottom => {
+            obj.h = (obj.h + delta.y).max(MIN_CARD_SIZE);
+        }
+        Edge::Left => {
+            let new_w = (obj.w - delta.x).max(MIN_CARD_SIZE);
+            obj.x += obj.w - new_w;
+            obj.w = new_w;
+        }
+        Edge::Top => {
+            let new_h = (obj.h - delta.y).max(MIN_CARD_SIZE);
+            obj.y += obj.h - new_h;
+            obj.h = new_h;
+        }
+    }
+}
+
 fn render_grid(ui: &mut Ui, camera: &Camera) {
     let rect = ui.max_rect();
     let grid_spacing = 50.0;
@@ -414,7 +591,6 @@ fn render_grid(ui: &mut Ui, camera: &Camera) {
         egui::Color32::from_rgba_premultiplied(c.r(), c.g(), c.b(), 40)
     };
 
-    // Determine visible world bounds
     let top_left_world = camera.screen_to_world(rect.min, &rect);
     let bottom_right_world = camera.screen_to_world(rect.max, &rect);
 
@@ -432,4 +608,28 @@ fn render_grid(ui: &mut Ui, camera: &Camera) {
             }
         }
     }
+}
+
+/// Add a note card to the loaded canvas document (used after async note creation).
+pub fn add_note_card_to_canvas(state: &mut CanvasState, note: &crate::model::WorkspaceNoteDocument, world_pos: Pos2) {
+    let Some(doc) = state.canvas_doc.clone() else {
+        return;
+    };
+    state.push_undo_snapshot(&doc);
+    let updated = crate::model::add_note_to_canvas_document(
+        &doc,
+        note,
+        Some((world_pos.x, world_pos.y)),
+    );
+    let selected_id = updated
+        .objects
+        .values()
+        .find(|o| o.note_id.as_deref() == Some(note.note_id.as_str()))
+        .map(|o| o.id.clone());
+    state.canvas_doc = Some(updated);
+    if let Some(obj_id) = selected_id {
+        state.selected_object_id = Some(obj_id);
+    }
+    state.mark_dirty();
+    state.set_status("Note card added");
 }

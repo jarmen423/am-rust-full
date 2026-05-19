@@ -105,6 +105,24 @@ Non-empty Ladybug graph data requires **real `.lbug`** + **`ladybug`** feature b
 
 ---
 
+## 6.1 TypeScript reference features intentionally not ported
+
+The dashboard in `agentic-memory-obsidian-clone/packages/am-dashboard` is **reference-only** for Rust `am-rust-full`. These product surfaces are deliberately out of scope for the Rust egui/WASM workspace unless explicitly requested:
+
+| Feature | Why not in Rust (yet) |
+|---------|------------------------|
+| **Excalidraw draw mode** | Heavy embedded editor; Rust canvas uses first-party `agentic_canvas` cards only. |
+| **Mermaid → drawing conversion** | Depends on Excalidraw pipeline and browser DOM tooling. |
+| **Floating agent chat / edit proposals** | Requires hosted MCP/OpenRouter wiring and rich editor integration. |
+| **OpenClaw shell metrics** | Product-specific dashboard chrome, not core workspace loop. |
+| **Cypher shell** | Operator/debug surface; Ladybug routes exist server-side but no REPL UI in egui. |
+| **Rich MDX/Markdown toolbar** | Rust editor is plain `egui::TextEdit`; sufficient for note CRUD, not parity with TS editor chrome. |
+| **Repo / project scope filters** | Hosted multi-tenant filters belong to managed backend UX, not local filesystem workspace. |
+
+Core Rust scope: notes, boards, canvas cards/connectors, graph explorer, local store/vault, Ladybug graph APIs.
+
+---
+
 ## 7. Cross-links
 
 - End-user overview: [`README.md`](README.md)

@@ -16,6 +16,7 @@ required-features = ["server"]
 [[bin]]
 name = "workspace-app"
 path = "src/app_main.rs"
+required-features = ["egui"]
 
 [[bin]]
 name = "jina-ladybug-repo-index"

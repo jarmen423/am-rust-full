@@ -260,14 +260,15 @@ mod tests {
     #[test]
     fn test_roundtrip_create_read() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = tmp.path().to_str().unwrap().to_string();
+        let store = tmp.path().to_str().unwrap();
+        let vault = tmp.path().join("vault").to_str().unwrap().to_string();
 
-        let board = create_board(&store, "ws-1", "My Board", None, None).unwrap();
+        let board = create_board(store, &vault, "ws-1", "My Board", None, None).unwrap();
         assert_eq!(board.title, "My Board");
         assert_eq!(board.board_type, "canvas");
         assert!(board.tldraw_document.is_object());
 
-        let found = get_board(&store, "ws-1", &board.board_id).unwrap();
+        let found = get_board(store, "ws-1", &board.board_id).unwrap();
         assert!(found.is_some());
         let found = found.unwrap();
         assert_eq!(found.board_id, board.board_id);
@@ -279,18 +280,19 @@ mod tests {
     #[test]
     fn test_update_preserves_tldraw() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = tmp.path().to_str().unwrap().to_string();
+        let store = tmp.path().to_str().unwrap();
+        let vault = tmp.path().join("vault").to_str().unwrap().to_string();
 
         let tldraw = serde_json::json!({
             "shapes": ["shape1", "shape2"],
             "bindings": [],
         });
 
-        let board = create_board(&store, "ws-1", "Tldraw Board", None, Some(tldraw.clone())).unwrap();
+        let board = create_board(store, &vault, "ws-1", "Tldraw Board", None, Some(tldraw.clone())).unwrap();
         let board_id = board.board_id.clone();
 
         let updated = update_board(
-            &store,
+            store,
             &board_id,
             "Updated Tldraw Board",
             tldraw.clone(),
@@ -308,9 +310,10 @@ mod tests {
     #[test]
     fn test_update_recalculates_counts() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = tmp.path().to_str().unwrap().to_string();
+        let store = tmp.path().to_str().unwrap();
+        let vault = tmp.path().join("vault").to_str().unwrap().to_string();
 
-        let board = create_board(&store, "ws-1", "Count Board", None, None).unwrap();
+        let board = create_board(store, &vault, "ws-1", "Count Board", None, None).unwrap();
         let board_id = board.board_id.clone();
 
         let objects = vec![WorkspaceBoardObject {
@@ -350,7 +353,7 @@ mod tests {
         }];
 
         let updated = update_board(
-            &store,
+            store,
             &board_id,
             "Count Board",
             serde_json::json!({}),
@@ -366,12 +369,13 @@ mod tests {
     #[test]
     fn test_list_boards() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = tmp.path().to_str().unwrap().to_string();
+        let store = tmp.path().to_str().unwrap();
+        let vault = tmp.path().join("vault").to_str().unwrap().to_string();
 
-        create_board(&store, "ws-1", "Board A", None, None).unwrap();
-        create_board(&store, "ws-1", "Board B", None, None).unwrap();
+        create_board(store, &vault, "ws-1", "Board A", None, None).unwrap();
+        create_board(store, &vault, "ws-1", "Board B", None, None).unwrap();
 
-        let boards = list_boards(&store, "ws-1").unwrap();
+        let boards = list_boards(store, "ws-1").unwrap();
         assert_eq!(boards.len(), 2);
     }
 
@@ -385,6 +389,80 @@ mod tests {
         assert_eq!(payload.board_id, "board-123");
         assert_eq!(payload.workspace_id, "ws-1");
         assert_eq!(payload.graph_status, "ingested");
+    }
+
+    #[test]
+    fn test_update_with_derived_canvas_artifacts() {
+        use am_workspace::model::{
+            add_note_to_canvas_document, create_empty_canvas_document,
+            derive_workspace_artifacts_from_canvas_document, WorkspaceNoteDocument,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().to_str().unwrap();
+        let vault = tmp.path().join("vault").to_str().unwrap().to_string();
+
+        let board = create_board(store, &vault, "ws-1", "Canvas Board", None, None).unwrap();
+        let board_id = board.board_id.clone();
+
+        let note = WorkspaceNoteDocument {
+            note_id: "note-abc".to_string(),
+            workspace_id: "ws-1".to_string(),
+            project_id: None,
+            slug: "note-abc".to_string(),
+            title: "Graph Note".to_string(),
+            body_markdown: "# Graph Note\n\nBody".to_string(),
+            summary: None,
+            tags: vec!["workspace".to_string()],
+            entity_hints: Vec::new(),
+            source: "test".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            archived_at: None,
+            graph_status: "not_ingested".to_string(),
+            markdown_path: None,
+            git_revision: None,
+        };
+
+        let canvas_doc =
+            add_note_to_canvas_document(&create_empty_canvas_document(), &note, Some((12.0, 34.0)));
+        let artifacts = derive_workspace_artifacts_from_canvas_document(
+            &canvas_doc,
+            &board_id,
+            "ws-1",
+            None,
+        );
+        assert_eq!(artifacts.objects.len(), 1);
+        assert_eq!(artifacts.objects[0].object_type, "note_card");
+        assert_eq!(artifacts.objects[0].note_id.as_deref(), Some("note-abc"));
+
+        let tldraw = serde_json::to_value(&canvas_doc).unwrap();
+        let updated = update_board(
+            store,
+            &board_id,
+            "Canvas Board",
+            tldraw,
+            artifacts.objects,
+            artifacts.connectors,
+            BoardUpdateMeta::default(),
+        )
+        .unwrap();
+        assert_eq!(updated.object_count, 1);
+
+        let reloaded = get_board(store, "ws-1", &board_id).unwrap().unwrap();
+        assert_eq!(reloaded.objects.len(), 1);
+        assert_eq!(reloaded.objects[0].note_id.as_deref(), Some("note-abc"));
+
+        let (nodes, edges) = crate::store::ladybug::build_board_local_graph(
+            &board_id,
+            &reloaded.title,
+            &reloaded.objects,
+            &reloaded.connectors,
+        );
+        assert!(nodes.iter().any(|n| n.node_id == "note:note-abc"));
+        assert!(edges
+            .iter()
+            .any(|e| e.relation_type == "OBJECT_REFERENCES_NOTE"));
     }
 
     #[test]
