@@ -111,7 +111,7 @@ Reference dashboard: `agentic-memory-obsidian-clone/packages/am-dashboard`. Gap 
 
 | Feature | Status |
 |---------|--------|
-| **Excalidraw draw mode** | **adapt** — hybrid: `engine: excalidraw` on board + Draw view; full npm bridge via optional `dist/excalidraw-bridge.html`. |
+| **Excalidraw draw mode** | **adapt** — hybrid: `engine: excalidraw` on board + Draw view; static `dist/excalidraw-bridge.html` copied by Trunk from `static/excalidraw-bridge.html`. |
 | **Mermaid → drawing** | **defer** — needs Excalidraw/DOM pipeline; not in egui core. |
 | **Agent chat / edit proposals** | **adapt** — local fallback + optional `AM_AGENT_PROVIDER_URL` stub; not hosted MCP. |
 | **OpenClaw shell metrics** | **out-of-crate** — use neutral **Diagnostics** panel (Ladybug up, attempts). |

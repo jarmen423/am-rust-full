@@ -26,7 +26,7 @@ required-features = ["jina-ladybug-index"]
 [[bin]]
 name = "lbug-quick-audit"
 path = "src/bin/lbug_quick_audit.rs"
-required-features = ["ladybug"]
+required-features = ["ladybug", "lbug-audit"]
 
 [features]
 # `server`: Axum/Tokio/Git2 stack — not WASM-safe (pulls `mio`). Omit for Trunk/WASM (`--no-default-features --features egui`).
@@ -42,6 +42,9 @@ server = [
     "dep:git2",
     "dep:uuid",
 ]
+# Operator CLI: open `.lbug` and print canned Cypher rows. Not built by default on Windows
+# (static `lbug` link fails MSVC); use `build_workspace_server.ps1` env + `--features lbug-audit`.
+lbug-audit = ["ladybug"]
 jina-ladybug-index = [
     "ladybug",
     "dep:clap",

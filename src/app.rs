@@ -423,9 +423,17 @@ impl eframe::App for WorkspaceApp {
                     ui.heading("Excalidraw draw mode (hybrid)");
                     ui.label(
                         RichText::new(
-                            "Boards with engine=excalidraw store scene JSON. Full bridge: dist/excalidraw-bridge.html (see DRAWING_SPIKE.md).",
+                            "Boards with engine=excalidraw store scene JSON. Open the bridge page for editing; Mermaid → drawing is not available in this build.",
                         )
                         .small(),
+                    );
+                    ui.hyperlink_to("Open excalidraw bridge", "/excalidraw-bridge.html");
+                    ui.label(
+                        RichText::new(
+                            "Mermaid diagrams cannot be converted to drawings here (needs DOM/Excalidraw pipeline; deferred).",
+                        )
+                        .small()
+                        .weak(),
                     );
                     if ui.button("New excalidraw board").clicked() {
                         let title = format!("Draw board {}", self.boards.len() + 1);

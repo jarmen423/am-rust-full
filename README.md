@@ -106,6 +106,21 @@ cargo build --bin workspace-server --no-default-features --features server
 
 ---
 
+## Verification (Windows)
+
+| Step | Command | Notes |
+|------|---------|--------|
+| Library unit tests | `cargo test -p am-workspace --lib` | Always safe without Ladybug DLL setup |
+| Full `cargo test` | After `build_workspace_server.ps1` with `LBUG_SHARED=1` in env | Default `cargo test` also builds `workspace-server` test harness and needs shared Ladybug link on MSVC |
+| Server binary | `pwsh -File scripts/build_workspace_server.ps1 -Profile release` | Copies `lbug_shared.dll` beside exe |
+| WASM bundle | `trunk build --release` | Unset `NO_COLOR` if Trunk errors on color |
+| Graph smoke | `pwsh -File scripts/smoke_workspace_graph.ps1` | Needs release `workspace-server.exe` |
+
+`lbug-quick-audit` is behind feature **`lbug-audit`** (not default). Build with  
+`cargo build -p am-workspace --bin lbug-quick-audit --features lbug-audit` after the shared-artifact script sets `LBUG_*`.
+
+---
+
 ## Scripts
 
 | Script | Purpose |

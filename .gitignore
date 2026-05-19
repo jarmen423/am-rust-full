@@ -1,6 +1,11 @@
 # Server static bundle (default DIST_PATH in `src/server/config.rs`)
 /dist/
 
+# IDE / local tooling (do not commit)
+.kilo/
+index.scip
+target-shim/
+
 # Rust / Cargo
 /target/
 **/*.rs.bk

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Excalidraw bridge — Agentic Memory Workspace</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #1a1a1a; color: #e8e8e8; font-family: system-ui, sans-serif; }
+    #toolbar {
+      display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+      padding: 0.5rem 0.75rem; border-bottom: 1px solid #333; background: #222;
+    }
+    #toolbar button, #toolbar label { font-size: 0.875rem; }
+    button { cursor: pointer; padding: 0.35rem 0.65rem; border-radius: 4px; border: 1px solid #555; background: #333; color: inherit; }
+    button:hover { background: #444; }
+    #status { margin-left: auto; font-size: 0.75rem; color: #909090; }
+    #host { height: calc(100% - 48px); }
+    #host iframe { width: 100%; height: 100%; border: 0; }
+    #fallback {
+      padding: 1.5rem; max-width: 42rem; line-height: 1.5;
+    }
+    #fallback code { background: #2a2a2a; padding: 0.1rem 0.35rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button type="button" id="btn-export">Export scene JSON</button>
+    <button type="button" id="btn-import">Import scene JSON</button>
+    <label><input type="file" id="file-import" accept="application/json" hidden /> Choose file</label>
+    <span id="status">Waiting for Excalidraw embed…</span>
+  </div>
+  <div id="host">
+    <div id="fallback">
+      <p><strong>Hybrid draw bridge</strong> — minimal static page served beside the WASM workspace.</p>
+      <p>
+        Full npm Excalidraw can replace the iframe below. Until then, use
+        <code>postMessage</code> with type <code>am-excalidraw-scene</code> and
+        <code>{ engine: "excalidraw", version: 1, scene: { … } }</code> to sync with the parent app.
+      </p>
+      <p>Mermaid → drawing is not implemented here (needs DOM pipeline; deferred in Rust port).</p>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const ENVELOPE_ENGINE = "excalidraw";
+      const ENVELOPE_VERSION = 1;
+      const statusEl = document.getElementById("status");
+      const host = document.getElementById("host");
+
+      let sceneEnvelope = { engine: ENVELOPE_ENGINE, version: ENVELOPE_VERSION, scene: { elements: [], appState: {}, files: {} } };
+
+      function setStatus(msg) {
+        statusEl.textContent = msg;
+      }
+
+      function postToParent(payload) {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: "am-excalidraw-scene", payload }, "*");
+        }
+      }
+
+      window.addEventListener("message", function (ev) {
+        const data = ev.data;
+        if (!data || data.type !== "am-excalidraw-load") return;
+        if (data.payload && data.payload.engine === ENVELOPE_ENGINE) {
+          sceneEnvelope = data.payload;
+          setStatus("Scene loaded from parent");
+        }
+      });
+
+      document.getElementById("btn-export").addEventListener("click", function () {
+        const text = JSON.stringify(sceneEnvelope, null, 2);
+        postToParent(sceneEnvelope);
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(
+            function () { setStatus("Exported (clipboard + postMessage)"); },
+            function () { setStatus("Exported via postMessage"); }
+          );
+        } else {
+          setStatus("Exported via postMessage");
+        }
+      });
+
+      document.getElementById("btn-import").addEventListener("click", function () {
+        document.getElementById("file-import").click();
+      });
+
+      document.getElementById("file-import").addEventListener("change", function (ev) {
+        const file = ev.target.files && ev.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = function () {
+          try {
+            const parsed = JSON.parse(String(reader.result));
+            if (parsed.engine === ENVELOPE_ENGINE) {
+              sceneEnvelope = parsed;
+            } else if (parsed.elements) {
+              sceneEnvelope = { engine: ENVELOPE_ENGINE, version: ENVELOPE_VERSION, scene: parsed };
+            } else {
+              throw new Error("Unrecognized JSON shape");
+            }
+            setStatus("Imported " + file.name);
+            postToParent(sceneEnvelope);
+          } catch (e) {
+            setStatus("Import failed: " + e.message);
+          }
+        };
+        reader.readAsText(file);
+      });
+
+      const embedUrl = "https://excalidraw.com/";
+      try {
+        const iframe = document.createElement("iframe");
+        iframe.title = "Excalidraw";
+        iframe.src = embedUrl;
+        iframe.allow = "clipboard-write";
+        host.innerHTML = "";
+        host.appendChild(iframe);
+        setStatus("Embedded excalidraw.com (manual export/import until API wiring)");
+      } catch (_) {
+        setStatus("Embed failed — use export/import buttons");
+      }
+
+      postToParent(sceneEnvelope);
+    })();
+  </script>
+</body>
+</html>
