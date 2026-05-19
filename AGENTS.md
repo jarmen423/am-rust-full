@@ -105,21 +105,22 @@ Non-empty Ladybug graph data requires **real `.lbug`** + **`ladybug`** feature b
 
 ---
 
-## 6.1 TypeScript reference features intentionally not ported
+## 6.1 TypeScript reference features — port status
 
-The dashboard in `agentic-memory-obsidian-clone/packages/am-dashboard` is **reference-only** for Rust `am-rust-full`. These product surfaces are deliberately out of scope for the Rust egui/WASM workspace unless explicitly requested:
+Reference dashboard: `agentic-memory-obsidian-clone/packages/am-dashboard`. Gap decisions: `D:\code\agentic-memory\.planning\execution-am-rust-full\PORT_GAP_PLAN.md`.
 
-| Feature | Why not in Rust (yet) |
-|---------|------------------------|
-| **Excalidraw draw mode** | Heavy embedded editor; Rust canvas uses first-party `agentic_canvas` cards only. |
-| **Mermaid → drawing conversion** | Depends on Excalidraw pipeline and browser DOM tooling. |
-| **Floating agent chat / edit proposals** | Requires hosted MCP/OpenRouter wiring and rich editor integration. |
-| **OpenClaw shell metrics** | Product-specific dashboard chrome, not core workspace loop. |
-| **Cypher shell** | Operator/debug surface; Ladybug routes exist server-side but no REPL UI in egui. |
-| **Rich MDX/Markdown toolbar** | Rust editor is plain `egui::TextEdit`; sufficient for note CRUD, not parity with TS editor chrome. |
-| **Repo / project scope filters** | Hosted multi-tenant filters belong to managed backend UX, not local filesystem workspace. |
+| Feature | Status |
+|---------|--------|
+| **Excalidraw draw mode** | **adapt** — hybrid: `engine: excalidraw` on board + Draw view; full npm bridge via optional `dist/excalidraw-bridge.html`. |
+| **Mermaid → drawing** | **defer** — needs Excalidraw/DOM pipeline; not in egui core. |
+| **Agent chat / edit proposals** | **adapt** — local fallback + optional `AM_AGENT_PROVIDER_URL` stub; not hosted MCP. |
+| **OpenClaw shell metrics** | **out-of-crate** — use neutral **Diagnostics** panel (Ladybug up, attempts). |
+| **Cypher shell** | **port** — read-only `/api/workspace/query/execute` + Query UI. |
+| **Rich markdown toolbar** | **port** — egui formatting toolbar in editor. |
+| **Repo / project scope filters** | **port** — sidebar scope + graph explore query params. |
+| **Board ingest** | **port** — server routes + canvas **Ingest board** + client API. |
 
-Core Rust scope: notes, boards, canvas cards/connectors, graph explorer, local store/vault, Ladybug graph APIs.
+Core Rust scope: notes, boards, canvas, graph explorer, diagnostics, query shell, agent panel (local), Ladybug graph APIs with observability attempts.
 
 ---
 

@@ -16,6 +16,8 @@ This crate lives under the **agentic-memory** monorepo as `am-rust-full`. Manage
 
 Graph routes (`/api/workspace/graph/*`) use **native Ladybug** when built with the **`ladybug`** feature (on by default) and a reachable `.lbug`. Disable **`ladybug`** only (keep **`server`**) to use the stub shim — empty Ladybug rows, still compiles **`workspace-server`**.
 
+Operator surfaces: `/api/workspace/diagnostics/*`, read-only `/api/workspace/query/execute`, and `/api/workspace/agent/chat` (local fallback). Planning registry: `D:\code\agentic-memory\.planning\execution-am-rust-full\`.
+
 **Trunk / WASM:** enable **`egui`** and disable **defaults** (`trunk build --no-default-features --features egui`). The **`server`** stack pulls **`tokio` → `mio`**, which does **not** compile for `wasm32-unknown-unknown`.
 
 ---
@@ -78,6 +80,7 @@ Uses the same egui code paths as WASM; does not start `workspace-server`.
 | `WORKSPACE_VAULT_PATH` | `$HOME/.agentic-memory/workspace-vaults` or override |
 | `LADYBUG_DB_PATH` | Optional explicit `.lbug` file; else discovery under store / `~/.agentic-memory` |
 | `RUST_LOG` | e.g. `info,tower_http=debug` |
+| `AM_AGENT_PROVIDER_URL` | Optional; when unset, `/api/workspace/agent/chat` uses honest local fallback |
 
 Copy [`.env.example`](.env.example) to `.env` locally if you use a loader; `.env` is gitignored.
 

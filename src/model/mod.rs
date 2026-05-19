@@ -1,4 +1,6 @@
+pub mod agent;
 pub mod canvas;
+pub mod diagnostics;
 pub mod graph;
 
 use chrono::{DateTime, Utc};
@@ -181,5 +183,7 @@ pub struct WorkspaceBootstrapPayload {
 
 // ── Re-exports ─────────────────────────────────────────────────────
 
+pub use agent::*;
 pub use canvas::*;
+pub use diagnostics::*;
 pub use graph::*;

@@ -1,3 +1,4 @@
+pub mod attempt;
 pub mod board;
 pub mod git;
 pub mod ladybug;

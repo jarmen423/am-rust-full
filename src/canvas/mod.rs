@@ -206,6 +206,7 @@ impl CanvasState {
 #[derive(Debug, Default)]
 pub struct CanvasOutput {
     pub save_board: Option<(String, WorkspaceCanvasDocument)>,
+    pub ingest_board: bool,
     pub create_note_at: Option<Pos2>,
     pub open_note_id: Option<String>,
     pub dirty: bool,
@@ -533,6 +534,10 @@ fn render_toolbar(ui: &mut Ui, state: &mut CanvasState, output: &mut CanvasOutpu
             .clicked()
         {
             queue_save(state, output);
+        }
+
+        if ui.button("Ingest board").clicked() {
+            output.ingest_board = true;
         }
 
         if state.save_in_flight {

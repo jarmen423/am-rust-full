@@ -8,6 +8,34 @@ use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 
+/// Graph/repo scope filters shared by sidebar and graph explorer.
+#[derive(Debug, Clone, Default)]
+pub struct ApiScope {
+    pub repo_id: Option<String>,
+    pub project_id: Option<String>,
+}
+
+impl ApiScope {
+    fn query_suffix(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref r) = self.repo_id {
+            if !r.is_empty() {
+                parts.push(format!("repo_id={}", urlencoding(r)));
+            }
+        }
+        if let Some(ref p) = self.project_id {
+            if !p.is_empty() {
+                parts.push(format!("project_id={}", urlencoding(p)));
+            }
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", parts.join("&"))
+        }
+    }
+}
+
 /// Async result wrapper for ehttp callbacks.
 #[derive(Debug, Clone)]
 pub enum Promise<T> {
@@ -249,6 +277,7 @@ pub fn create_note(
     title: &str,
     body_markdown: &str,
     tags: Vec<String>,
+    project_id: Option<String>,
     state: SharedPromise<WorkspaceNoteDocument>,
     ctx: &egui::Context,
 ) {
@@ -265,7 +294,7 @@ pub fn create_note(
         title: title.to_string(),
         body_markdown: body_markdown.to_string(),
         tags,
-        project_id: None,
+        project_id,
     };
     post_wrapped(
         "/api/workspace/notes",
@@ -282,6 +311,7 @@ pub fn update_note(
     title: &str,
     body_markdown: &str,
     tags: Vec<String>,
+    project_id: Option<String>,
     state: SharedPromise<WorkspaceNoteDocument>,
     ctx: &egui::Context,
 ) {
@@ -298,7 +328,7 @@ pub fn update_note(
         title: title.to_string(),
         body_markdown: body_markdown.to_string(),
         tags,
-        project_id: None,
+        project_id,
     };
     put_wrapped(
         &format!("/api/workspace/notes/{note_id}"),
@@ -417,6 +447,36 @@ pub fn save_board(
     );
 }
 
+/// Create a new board with a custom document envelope.
+pub fn create_board_with_document(
+    workspace_id: &str,
+    title: &str,
+    tldraw_document: serde_json::Value,
+    state: SharedPromise<WorkspaceBoard>,
+    ctx: &egui::Context,
+) {
+    #[derive(serde::Serialize)]
+    struct Body {
+        workspace_id: String,
+        title: String,
+        board_type: Option<String>,
+        tldraw_document: Option<serde_json::Value>,
+    }
+    let body = Body {
+        workspace_id: workspace_id.to_string(),
+        title: title.to_string(),
+        board_type: Some("canvas".to_string()),
+        tldraw_document: Some(tldraw_document),
+    };
+    post_wrapped(
+        "/api/workspace/boards",
+        &body,
+        state,
+        ctx,
+        |resp: BoardResp| resp.board,
+    );
+}
+
 /// Create a new board.
 pub fn create_board(
     workspace_id: &str,
@@ -465,11 +525,12 @@ struct GraphExploreResp {
 
 /// Fetch the workspace explore graph.
 pub fn fetch_graph_explore(
+    scope: &ApiScope,
     state: SharedPromise<crate::model::GraphResponse>,
     ctx: &egui::Context,
 ) {
     get_wrapped(
-        "/api/workspace/graph/explore",
+        &format!("/api/workspace/graph/explore{}", scope.query_suffix()),
         state,
         ctx,
         |resp: GraphExploreResp| crate::model::GraphResponse {
@@ -488,7 +549,7 @@ pub fn fetch_graph_note(
     ctx: &egui::Context,
 ) {
     get_wrapped(
-        &format!("/api/workspace/graph/notes/{note_id}"),
+        &format!("/api/workspace/graph/note/{note_id}"),
         state,
         ctx,
         |resp: GraphExploreResp| crate::model::GraphResponse {
@@ -507,7 +568,7 @@ pub fn fetch_graph_board(
     ctx: &egui::Context,
 ) {
     get_wrapped(
-        &format!("/api/workspace/graph/boards/{board_id}"),
+        &format!("/api/workspace/graph/board/{board_id}"),
         state,
         ctx,
         |resp: GraphExploreResp| crate::model::GraphResponse {
@@ -554,6 +615,193 @@ pub fn fetch_graph_picker(
         ctx.request_repaint();
     });
 }
+
+/// Ingest full board into Ladybug graph.
+pub fn ingest_board(
+    board_id: &str,
+    workspace_id: &str,
+    state: SharedPromise<WorkspaceIngestPayload>,
+    ctx: &egui::Context,
+) {
+    #[derive(serde::Serialize)]
+    struct Body {
+        workspace_id: String,
+    }
+    let body = Body {
+        workspace_id: workspace_id.to_string(),
+    };
+    post_wrapped(
+        &format!("/api/workspace/boards/{board_id}/ingest"),
+        &body,
+        state,
+        ctx,
+        |v: IngestResp| v.payload,
+    );
+}
+
+#[derive(serde::Deserialize)]
+struct IngestResp {
+    #[allow(dead_code)]
+    status: String,
+    #[serde(alias = "ingest")]
+    payload: WorkspaceIngestPayload,
+}
+
+/// Fetch diagnostics health.
+pub fn fetch_diagnostics_health(
+    state: SharedPromise<DiagnosticsHealthResponse>,
+    ctx: &egui::Context,
+) {
+    *state.lock() = Promise::Pending;
+    let request = ehttp::Request::get("/api/workspace/diagnostics/health");
+    let ctx = ctx.clone();
+    ehttp::fetch(request, move |result| {
+        *state.lock() = match result {
+            Ok(response) if response.ok => {
+                match serde_json::from_slice::<DiagnosticsHealthResponse>(&response.bytes) {
+                    Ok(v) => Promise::Ready(v),
+                    Err(e) => Promise::Failed(format!("JSON parse: {e}")),
+                }
+            }
+            Ok(response) => Promise::Failed(format!("HTTP {}", response.status)),
+            Err(e) => Promise::Failed(e),
+        };
+        ctx.request_repaint();
+    });
+}
+
+/// Ping diagnostics channel; returns attempt_id.
+pub fn ping_diagnostics(state: SharedPromise<String>, ctx: &egui::Context) {
+    #[derive(serde::Deserialize)]
+    struct PingResp {
+        attempt: AttemptPing,
+    }
+    #[derive(serde::Deserialize)]
+    struct AttemptPing {
+        attempt_id: String,
+    }
+    *state.lock() = Promise::Pending;
+    let request = ehttp::Request::post("/api/workspace/diagnostics/ping", vec![]);
+    let ctx = ctx.clone();
+    ehttp::fetch(request, move |result| {
+        *state.lock() = match result {
+            Ok(response) if response.ok => match serde_json::from_slice::<PingResp>(&response.bytes)
+            {
+                Ok(p) => Promise::Ready(p.attempt.attempt_id),
+                Err(e) => Promise::Failed(format!("JSON parse: {e}")),
+            },
+            Ok(response) => Promise::Failed(format!("HTTP {}", response.status)),
+            Err(e) => Promise::Failed(e),
+        };
+        ctx.request_repaint();
+    });
+}
+
+/// Execute read-only Cypher.
+pub fn execute_query(
+    cypher: &str,
+    state: SharedPromise<Result<crate::query_shell::QueryResultView, String>>,
+    ctx: &egui::Context,
+) {
+    #[derive(serde::Serialize)]
+    struct Body {
+        cypher: String,
+    }
+    *state.lock() = Promise::Pending;
+    let body = serde_json::to_vec(&Body {
+        cypher: cypher.to_string(),
+    })
+    .unwrap_or_default();
+    let mut request = ehttp::Request::post("/api/workspace/query/execute", body);
+    request
+        .headers
+        .insert("Content-Type".to_string(), "application/json".to_string());
+    let ctx = ctx.clone();
+    ehttp::fetch(request, move |result| {
+        *state.lock() = match result {
+            Ok(response) if response.ok => match serde_json::from_slice::<serde_json::Value>(&response.bytes) {
+                Ok(json) => {
+                    if json.get("status").and_then(|s| s.as_str()) == Some("ok") {
+                        let columns = json
+                            .get("columns")
+                            .and_then(|c| c.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let rows = json
+                            .get("rows")
+                            .and_then(|r| r.as_array())
+                            .map(|outer| {
+                                outer
+                                    .iter()
+                                    .filter_map(|row| {
+                                        row.as_array().map(|cells| {
+                                            cells
+                                                .iter()
+                                                .filter_map(|c| c.as_str().map(String::from))
+                                                .collect()
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let attempt_id = json
+                            .get("attempt_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        Promise::Ready(Ok(crate::query_shell::QueryResultView {
+                            columns,
+                            rows,
+                            attempt_id,
+                        }))
+                    } else {
+                        let msg = json
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("query failed")
+                            .to_string();
+                        Promise::Ready(Err(msg))
+                    }
+                }
+                Err(e) => Promise::Failed(format!("JSON parse: {e}")),
+            },
+            Ok(response) => Promise::Failed(format!("HTTP {}", response.status)),
+            Err(e) => Promise::Failed(e),
+        };
+        ctx.request_repaint();
+    });
+}
+
+/// Agent chat request.
+pub fn agent_chat(
+    message: &str,
+    note_id: Option<&str>,
+    board_id: Option<&str>,
+    project_id: Option<String>,
+    state: SharedPromise<AgentChatResponse>,
+    ctx: &egui::Context,
+) {
+    let body = AgentChatRequest {
+        workspace_id: "default".to_string(),
+        project_id,
+        message: message.to_string(),
+        note_id: note_id.map(String::from),
+        board_id: board_id.map(String::from),
+    };
+    post_wrapped(
+        "/api/workspace/agent/chat",
+        &body,
+        state,
+        ctx,
+        |v: AgentChatWrap| v,
+    );
+}
+
+type AgentChatWrap = AgentChatResponse;
 
 fn urlencoding(s: &str) -> String {
     s.chars()

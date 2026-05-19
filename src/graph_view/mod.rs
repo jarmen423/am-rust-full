@@ -14,6 +14,8 @@ pub struct GraphViewState {
     pub selected_node_id: Option<String>,
     pub layout_positions: HashMap<String, Pos2>,
     pub status_message: Option<(String, f32)>,
+    pub filter_repo_id: String,
+    pub filter_project_id: String,
 }
 
 impl GraphViewState {
@@ -48,6 +50,14 @@ pub struct GraphViewOutput {
 pub fn show(ui: &mut Ui, state: &mut GraphViewState) -> GraphViewOutput {
     let mut output = GraphViewOutput::default();
 
+    ui.horizontal(|ui| {
+        ui.label("repo:");
+        ui.add(egui::TextEdit::singleline(&mut state.filter_repo_id).desired_width(80.0));
+        ui.label("project:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.filter_project_id).desired_width(80.0),
+        );
+    });
     ui.horizontal(|ui| {
         ui.heading("Graph Explorer");
         if ui.button("Refresh").clicked() {

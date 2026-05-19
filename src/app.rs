@@ -8,8 +8,11 @@ use crate::model::{
     derive_workspace_artifacts_from_canvas_document, NoteHistoryItem, WorkspaceBoard,
     WorkspaceNoteDocument,
 };
+use crate::agent_panel::{self, AgentPanelState};
+use crate::diagnostics_panel::{self, DiagnosticsPanelState};
+use crate::query_shell::{self, QueryShellState};
 use crate::sidebar::{self, SidebarOutput, SidebarState};
-use egui::{Context, Pos2};
+use egui::{Context, Pos2, RichText};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -19,6 +22,10 @@ enum AppView {
     Editor,
     Canvas,
     Graph,
+    Diagnostics,
+    QueryShell,
+    Agent,
+    Draw,
 }
 
 pub struct WorkspaceApp {
@@ -46,6 +53,16 @@ pub struct WorkspaceApp {
     pending_note_world_pos: Option<Pos2>,
     pending_canvas_note: bool,
     graph_loaded: bool,
+    api_scope: api::ApiScope,
+    diagnostics: DiagnosticsPanelState,
+    query_shell: QueryShellState,
+    agent: AgentPanelState,
+    diagnostics_health_promise: api::SharedPromise<crate::model::DiagnosticsHealthResponse>,
+    diagnostics_ping_promise: api::SharedPromise<String>,
+    query_promise: api::SharedPromise<Result<query_shell::QueryResultView, String>>,
+    agent_chat_promise: api::SharedPromise<crate::model::AgentChatResponse>,
+    pending_agent_message: Option<String>,
+    ingest_promise: api::SharedPromise<crate::model::WorkspaceIngestPayload>,
 }
 
 impl WorkspaceApp {
@@ -75,7 +92,38 @@ impl WorkspaceApp {
             pending_note_world_pos: None,
             pending_canvas_note: false,
             graph_loaded: false,
+            api_scope: api::ApiScope::default(),
+            diagnostics: DiagnosticsPanelState::default(),
+            query_shell: QueryShellState::default(),
+            agent: AgentPanelState::default(),
+            diagnostics_health_promise: Arc::new(Mutex::new(api::Promise::Idle)),
+            diagnostics_ping_promise: Arc::new(Mutex::new(api::Promise::Idle)),
+            query_promise: Arc::new(Mutex::new(api::Promise::Idle)),
+            agent_chat_promise: Arc::new(Mutex::new(api::Promise::Idle)),
+            pending_agent_message: None,
+            ingest_promise: Arc::new(Mutex::new(api::Promise::Idle)),
         }
+    }
+
+    fn sync_scope_from_sidebar(&mut self) {
+        let repo = self.sidebar.filter_repo_id.trim();
+        let project = self.sidebar.filter_project_id.trim();
+        self.api_scope.repo_id = if repo.is_empty() {
+            None
+        } else {
+            Some(repo.to_string())
+        };
+        self.api_scope.project_id = if project.is_empty() {
+            None
+        } else {
+            Some(project.to_string())
+        };
+        self.graph.filter_repo_id = self.sidebar.filter_repo_id.clone();
+        self.graph.filter_project_id = self.sidebar.filter_project_id.clone();
+    }
+
+    fn scope_project_id(&self) -> Option<String> {
+        self.api_scope.project_id.clone()
     }
 
     fn refresh_notes(&mut self, ctx: &Context) {
@@ -97,6 +145,7 @@ impl WorkspaceApp {
                 &req.title,
                 &req.body_markdown,
                 req.tags,
+                self.scope_project_id(),
                 self.create_promise.clone(),
                 ctx,
             );
@@ -106,6 +155,7 @@ impl WorkspaceApp {
                 &req.title,
                 &req.body_markdown,
                 req.tags,
+                self.scope_project_id(),
                 self.save_promise.clone(),
                 ctx,
             );
@@ -113,7 +163,8 @@ impl WorkspaceApp {
     }
 
     fn load_graph(&mut self, ctx: &Context) {
-        api::fetch_graph_explore(self.graph_promise.clone(), ctx);
+        self.sync_scope_from_sidebar();
+        api::fetch_graph_explore(&self.api_scope, self.graph_promise.clone(), ctx);
     }
 
     fn poll_promises(&mut self) {
@@ -254,6 +305,29 @@ impl WorkspaceApp {
                 self.graph.set_status(format!("Graph load failed: {msg}"));
             }
         }
+
+        diagnostics_panel::poll_health(&self.diagnostics_health_promise, &mut self.diagnostics);
+        diagnostics_panel::poll_ping(&self.diagnostics_ping_promise, &mut self.diagnostics);
+        query_shell::poll_execute(&self.query_promise, &mut self.query_shell);
+        if let Some(msg) = self.pending_agent_message.take() {
+            agent_panel::poll_chat(&self.agent_chat_promise, &mut self.agent, &msg);
+        } else {
+            let mut lock = self.agent_chat_promise.lock();
+            if let api::Promise::Ready(resp) = std::mem::replace(&mut *lock, api::Promise::Idle) {
+                self.agent.transcript.push((false, resp.reply));
+                self.agent.provider_label = Some(resp.provider);
+                self.agent.proposals = resp.proposals;
+            }
+        }
+        {
+            let mut lock = self.ingest_promise.lock();
+            if let Some(payload) = lock.take() {
+                self.canvas.status_message = Some((
+                    format!("Ingested {} objects", payload.object_count),
+                    4.0,
+                ));
+            }
+        }
     }
 
     fn refresh_notes_after_change(&mut self) {
@@ -297,6 +371,34 @@ impl eframe::App for WorkspaceApp {
             ctx.set_style(style);
         }
 
+        egui::TopBottomPanel::top("view_tabs").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                for (label, view) in [
+                    ("Notes", AppView::Editor),
+                    ("Canvas", AppView::Canvas),
+                    ("Graph", AppView::Graph),
+                    ("Draw", AppView::Draw),
+                    ("Query", AppView::QueryShell),
+                    ("Agent", AppView::Agent),
+                    ("Diag", AppView::Diagnostics),
+                ] {
+                    let selected = self.app_view == view;
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.app_view = view;
+                        if view == AppView::Graph && !self.graph_loaded {
+                            self.load_graph(ctx);
+                        }
+                        if view == AppView::Diagnostics {
+                            api::fetch_diagnostics_health(
+                                self.diagnostics_health_promise.clone(),
+                                ctx,
+                            );
+                        }
+                    }
+                }
+            });
+        });
+
         egui::SidePanel::left("sidebar")
             .default_width(280.0)
             .min_width(220.0)
@@ -316,11 +418,104 @@ impl eframe::App for WorkspaceApp {
                     self.handle_canvas_output(canvas_out, ctx);
                 });
             }
+            AppView::Draw => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.heading("Excalidraw draw mode (hybrid)");
+                    ui.label(
+                        RichText::new(
+                            "Boards with engine=excalidraw store scene JSON. Full bridge: dist/excalidraw-bridge.html (see DRAWING_SPIKE.md).",
+                        )
+                        .small(),
+                    );
+                    if ui.button("New excalidraw board").clicked() {
+                        let title = format!("Draw board {}", self.boards.len() + 1);
+                        api::create_board_with_document(
+                            "default",
+                            &title,
+                            crate::model::create_empty_excalidraw_document(),
+                            self.board_create_promise.clone(),
+                            ctx,
+                        );
+                    }
+                    if let Some(ref board) = self.current_board {
+                        if crate::model::is_excalidraw_document(&board.tldraw_document) {
+                            ui.monospace(
+                                serde_json::to_string_pretty(&board.tldraw_document)
+                                    .unwrap_or_default(),
+                            );
+                        } else {
+                            ui.label("Select an excalidraw board or create one.");
+                        }
+                    }
+                });
+            }
             AppView::Graph => {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let graph_out = graph_view::show(ui, &mut self.graph);
                     if graph_out.refresh_requested {
+                        self.sidebar.filter_repo_id = self.graph.filter_repo_id.clone();
+                        self.sidebar.filter_project_id = self.graph.filter_project_id.clone();
                         self.load_graph(ctx);
+                    }
+                });
+            }
+            AppView::Diagnostics => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let out = diagnostics_panel::show(ui, &mut self.diagnostics);
+                    if out.refresh_health {
+                        api::fetch_diagnostics_health(
+                            self.diagnostics_health_promise.clone(),
+                            ctx,
+                        );
+                    }
+                    if out.ping_diagnostics {
+                        api::ping_diagnostics(self.diagnostics_ping_promise.clone(), ctx);
+                    }
+                });
+            }
+            AppView::QueryShell => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let out = query_shell::show(ui, &mut self.query_shell);
+                    if out.execute {
+                        api::execute_query(
+                            &self.query_shell.cypher,
+                            self.query_promise.clone(),
+                            ctx,
+                        );
+                    }
+                });
+            }
+            AppView::Agent => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let out = agent_panel::show(ui, &mut self.agent);
+                    if out.send_chat {
+                        let msg = self.agent.message.clone();
+                        self.pending_agent_message = Some(msg.clone());
+                        api::agent_chat(
+                            &msg,
+                            self.editor.note.as_ref().map(|n| n.note_id.as_str()),
+                            self.current_board
+                                .as_ref()
+                                .map(|b| b.board_id.as_str()),
+                            self.scope_project_id(),
+                            self.agent_chat_promise.clone(),
+                            ctx,
+                        );
+                        self.agent.message.clear();
+                    }
+                    if let Some(pid) = out.apply_proposal_id {
+                        if let Some(prop) = self
+                            .agent
+                            .proposals
+                            .iter()
+                            .find(|p| p.proposal_id == pid)
+                        {
+                            if let Some(md) = &prop.suggested_markdown {
+                                self.editor.draft_body.push_str(md);
+                                self.editor.check_dirty();
+                                self.app_view = AppView::Editor;
+                            }
+                        }
                     }
                 });
             }
@@ -338,11 +533,24 @@ impl eframe::App for WorkspaceApp {
 
 impl WorkspaceApp {
     fn handle_sidebar_output(&mut self, out: SidebarOutput, ctx: &Context) {
+        if out.scope_changed {
+            self.sync_scope_from_sidebar();
+        }
         if out.open_graph {
             self.app_view = AppView::Graph;
             if !self.graph_loaded {
                 self.load_graph(ctx);
             }
+        }
+        if out.open_diagnostics {
+            self.app_view = AppView::Diagnostics;
+            api::fetch_diagnostics_health(self.diagnostics_health_promise.clone(), ctx);
+        }
+        if out.open_query_shell {
+            self.app_view = AppView::QueryShell;
+        }
+        if out.open_agent {
+            self.app_view = AppView::Agent;
         }
 
         if let Some(note_id) = out.selected_note_id {
@@ -354,7 +562,14 @@ impl WorkspaceApp {
         }
         if let Some(title) = out.create_note_title {
             self.pending_canvas_note = false;
-            api::create_note(&title, "", Vec::new(), self.create_promise.clone(), ctx);
+            api::create_note(
+                &title,
+                "",
+                Vec::new(),
+                self.scope_project_id(),
+                self.create_promise.clone(),
+                ctx,
+            );
         }
 
         if let Some(board_id) = out.selected_board_id {
@@ -371,6 +586,17 @@ impl WorkspaceApp {
     }
 
     fn handle_canvas_output(&mut self, out: CanvasOutput, ctx: &Context) {
+        if out.ingest_board {
+            if let Some(ref board) = self.current_board {
+                api::ingest_board(
+                    &board.board_id,
+                    &board.workspace_id,
+                    self.ingest_promise.clone(),
+                    ctx,
+                );
+            }
+        }
+
         if let Some((board_id, doc)) = out.save_board {
             let workspace_id = self
                 .current_board
@@ -417,6 +643,7 @@ impl WorkspaceApp {
                 &title,
                 body,
                 vec!["workspace".to_string(), "canvas".to_string()],
+                self.scope_project_id(),
                 self.create_promise.clone(),
                 ctx,
             );

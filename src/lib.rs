@@ -12,15 +12,21 @@ pub mod repo_jina_lb;
 // depend on egui/eframe/ehttp.
 
 #[cfg(feature = "egui")]
+pub mod agent_panel;
+#[cfg(feature = "egui")]
 pub mod api;
 #[cfg(feature = "egui")]
 pub mod app;
 #[cfg(feature = "egui")]
 pub mod canvas;
 #[cfg(feature = "egui")]
+pub mod diagnostics_panel;
+#[cfg(feature = "egui")]
 pub mod editor;
 #[cfg(feature = "egui")]
 pub mod graph_view;
+#[cfg(feature = "egui")]
+pub mod query_shell;
 #[cfg(feature = "egui")]
 pub mod sidebar;
 

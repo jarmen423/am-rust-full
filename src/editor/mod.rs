@@ -177,6 +177,12 @@ pub fn show(ui: &mut Ui, state: &mut EditorState) -> EditorOutput {
     ui.separator();
     ui.add_space(4.0);
 
+    if let Some(fmt) = show_format_toolbar(ui) {
+        apply_format(state, fmt);
+        output.format_action = Some(fmt);
+    }
+    ui.add_space(4.0);
+
     // ── Body (markdown) ─────────────────────────────────────────────
     let available = ui.available_rect_before_wrap();
     let body_height = if state.show_history {
@@ -270,6 +276,19 @@ pub struct SaveRequest {
     pub tags: Vec<String>,
 }
 
+/// Markdown formatting action from the toolbar.
+#[derive(Debug, Clone, Copy)]
+pub enum FormatAction {
+    Heading,
+    Bold,
+    Italic,
+    Code,
+    Link,
+    BulletList,
+    NumberedList,
+    Table,
+}
+
 /// Actions produced by the editor UI.
 #[derive(Debug, Default)]
 pub struct EditorOutput {
@@ -279,4 +298,45 @@ pub struct EditorOutput {
     pub fetch_history: Option<String>,
     /// User clicked Revert — (note_id, revision_sha).
     pub revert_request: Option<(String, String)>,
+    /// Toolbar formatting command.
+    pub format_action: Option<FormatAction>,
+    /// Apply agent proposal markdown to the draft body.
+    pub apply_proposal_markdown: Option<String>,
+}
+
+fn apply_format(state: &mut EditorState, action: FormatAction) {
+    let insert = match action {
+        FormatAction::Heading => "\n## ".to_string(),
+        FormatAction::Bold => "**".to_string(),
+        FormatAction::Italic => "_".to_string(),
+        FormatAction::Code => "`".to_string(),
+        FormatAction::Link => "[label](url)".to_string(),
+        FormatAction::BulletList => "\n- ".to_string(),
+        FormatAction::NumberedList => "\n1. ".to_string(),
+        FormatAction::Table => "\n| col | col |\n| --- | --- |\n| a | b |\n".to_string(),
+    };
+    state.draft_body.push_str(&insert);
+    state.check_dirty();
+}
+
+/// Show markdown formatting toolbar; returns action if clicked.
+fn show_format_toolbar(ui: &mut Ui) -> Option<FormatAction> {
+    let mut action = None;
+    ui.horizontal_wrapped(|ui| {
+        for (label, a) in [
+            ("H", FormatAction::Heading),
+            ("B", FormatAction::Bold),
+            ("I", FormatAction::Italic),
+            ("`", FormatAction::Code),
+            ("Link", FormatAction::Link),
+            ("•", FormatAction::BulletList),
+            ("1.", FormatAction::NumberedList),
+            ("Tbl", FormatAction::Table),
+        ] {
+            if ui.small_button(label).clicked() {
+                action = Some(a);
+            }
+        }
+    });
+    action
 }

@@ -887,6 +887,48 @@ pub fn build_note_local_graph(
     (nodes, edges)
 }
 
+/// Run an ad-hoc read-only query for the operator shell; returns stringified cells.
+pub fn run_adhoc_query(
+    db: &LadybugDb,
+    sql: &str,
+    max_rows: usize,
+) -> Result<(Vec<String>, Vec<Vec<String>>, bool), String> {
+    #[cfg(feature = "ladybug")]
+    {
+        let conn = lbug::Connection::new(&db.db).map_err(|e| e.to_string())?;
+        let mut columns: Vec<String> = Vec::new();
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut truncated = false;
+        for (idx, row) in conn
+            .query(sql)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .enumerate()
+        {
+            if idx >= max_rows {
+                truncated = true;
+                break;
+            }
+            if columns.is_empty() {
+                columns = (0..row.len())
+                    .map(|i| format!("col_{i}"))
+                    .collect();
+            }
+            let mut cells = Vec::with_capacity(row.len());
+            for v in row {
+                cells.push(value_as_required_string(&v)?);
+            }
+            rows.push(cells);
+        }
+        Ok((columns, rows, truncated))
+    }
+    #[cfg(not(feature = "ladybug"))]
+    {
+        let _ = (db, sql, max_rows);
+        Ok((vec![], vec![], false))
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]

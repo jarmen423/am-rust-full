@@ -20,6 +20,10 @@ pub struct SidebarState {
     pub show_new_board_input: bool,
     /// Draft title for a new board.
     pub new_board_title: String,
+    /// Optional repo filter for graph APIs.
+    pub filter_repo_id: String,
+    /// Optional project filter for graph APIs and note create.
+    pub filter_project_id: String,
 }
 
 impl SidebarState {
@@ -92,6 +96,29 @@ pub fn show(
             }
         });
     });
+
+    ui.add_space(4.0);
+
+    ui.label(RichText::new("Scope").small().strong());
+    ui.horizontal(|ui| {
+        ui.label("repo:");
+        ui.add(
+            TextEdit::singleline(&mut state.filter_repo_id)
+                .hint_text("optional")
+                .desired_width(90.0),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("project:");
+        ui.add(
+            TextEdit::singleline(&mut state.filter_project_id)
+                .hint_text("optional")
+                .desired_width(90.0),
+        );
+    });
+    if ui.button("Apply scope").clicked() {
+        output.scope_changed = true;
+    }
 
     ui.add_space(4.0);
 
@@ -371,6 +398,15 @@ pub fn show(
     if ui.button("Graph Explorer").clicked() {
         output.open_graph = true;
     }
+    if ui.button("Diagnostics").clicked() {
+        output.open_diagnostics = true;
+    }
+    if ui.button("Cypher shell").clicked() {
+        output.open_query_shell = true;
+    }
+    if ui.button("Agent").clicked() {
+        output.open_agent = true;
+    }
 
     output
 }
@@ -392,4 +428,12 @@ pub struct SidebarOutput {
     pub create_board_title: Option<String>,
     /// User opened the graph explorer view.
     pub open_graph: bool,
+    /// Repo/project filters changed.
+    pub scope_changed: bool,
+    /// Open diagnostics panel.
+    pub open_diagnostics: bool,
+    /// Open query shell.
+    pub open_query_shell: bool,
+    /// Open agent panel.
+    pub open_agent: bool,
 }

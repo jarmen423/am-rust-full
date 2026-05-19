@@ -8,7 +8,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod config;
 #[cfg(not(feature = "ladybug"))]
 mod lbug_shim;
+mod observability;
 mod routes;
+mod services;
 mod static_files;
 mod store;
 
@@ -42,6 +44,7 @@ async fn main() {
     let state = Arc::new(WorkspaceState {
         config: config.clone(),
         ladybug_db,
+        attempt_store: store::attempt::AttemptStore::new(),
     });
 
     let api_routes = routes::create_routes(state.clone());

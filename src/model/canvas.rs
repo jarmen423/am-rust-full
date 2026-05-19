@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use super::{WorkspaceBoardObject, WorkspaceConnector, WorkspaceNoteDocument};
 
 pub const AGENTIC_CANVAS_ENGINE: &str = "agentic_canvas";
+pub const EXCALIDRAW_ENGINE: &str = "excalidraw";
 pub const AGENTIC_CANVAS_VERSION: i32 = 1;
+pub const EXCALIDRAW_VERSION: i32 = 1;
 pub const NOTE_CARD_WIDTH: f32 = 340.0;
 pub const NOTE_CARD_HEIGHT: f32 = 220.0;
 
@@ -66,6 +68,23 @@ pub struct WorkspaceCanvasDocument {
 pub struct CanvasArtifacts {
     pub objects: Vec<WorkspaceBoardObject>,
     pub connectors: Vec<WorkspaceConnector>,
+}
+
+/// Whether a board document envelope uses the Excalidraw hybrid engine.
+pub fn is_excalidraw_document(value: &serde_json::Value) -> bool {
+    value
+        .get("engine")
+        .and_then(|e| e.as_str())
+        == Some(EXCALIDRAW_ENGINE)
+}
+
+/// Empty Excalidraw scene envelope for hybrid draw mode.
+pub fn create_empty_excalidraw_document() -> serde_json::Value {
+    serde_json::json!({
+        "engine": EXCALIDRAW_ENGINE,
+        "version": EXCALIDRAW_VERSION,
+        "scene": { "elements": [], "appState": {} }
+    })
 }
 
 /// Create an empty first-party canvas document.
