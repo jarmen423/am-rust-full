@@ -404,10 +404,28 @@ pub fn fetch_board(
     );
 }
 
+/// Delete a board by id.
+pub fn delete_board(board_id: &str, state: SharedPromise<bool>, ctx: &egui::Context) {
+    *state.lock() = Promise::Pending;
+    let path = format!("/api/workspace/boards/{board_id}");
+    let mut request = ehttp::Request::post(&path, vec![]);
+    request.method = "DELETE".to_string();
+    let ctx = ctx.clone();
+    ehttp::fetch(request, move |result| {
+        *state.lock() = match result {
+            Ok(response) if response.ok => Promise::Ready(true),
+            Ok(response) => Promise::Failed(format!("HTTP {}", response.status)),
+            Err(e) => Promise::Failed(e),
+        };
+        ctx.request_repaint();
+    });
+}
+
 /// Save (update) an existing board.
 /// The board's tldraw_document is serialized from the canvas document.
 pub fn save_board(
     board_id: &str,
+    workspace_id: &str,
     title: &str,
     tldraw_document: &serde_json::Value,
     objects: Vec<crate::model::WorkspaceBoardObject>,
@@ -420,16 +438,14 @@ pub fn save_board(
         workspace_id: String,
         title: String,
         tldraw_document: serde_json::Value,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
         objects: Vec<crate::model::WorkspaceBoardObject>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
         connectors: Vec<crate::model::WorkspaceConnector>,
         description: Option<String>,
         tags: Option<Vec<String>>,
         board_state: Option<String>,
     }
     let body = Body {
-        workspace_id: "default".to_string(),
+        workspace_id: workspace_id.to_string(),
         title: title.to_string(),
         tldraw_document: tldraw_document.clone(),
         objects,

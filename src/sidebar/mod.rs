@@ -191,11 +191,17 @@ pub fn show(
         ui.label(RichText::new("Click '+ New' to create one.").small());
     }
 
-    ScrollArea::vertical().id_salt("note_list").show_rows(
-        ui,
-        ui.text_style_height(&egui::TextStyle::Body),
-        filtered.len(),
-        |ui, row_range| {
+    // Cap note list height so the Boards section stays visible below.
+    let row_h = ui.text_style_height(&egui::TextStyle::Body) + 12.0;
+    let notes_max_h = (ui.available_height() * 0.45).clamp(120.0, 320.0);
+    ScrollArea::vertical()
+        .id_salt("note_list")
+        .max_height(notes_max_h)
+        .show_rows(
+            ui,
+            row_h,
+            filtered.len(),
+            |ui, row_range| {
             for note in filtered.iter().skip(row_range.start).take(row_range.len()) {
                 let is_selected = state
                     .selected_note_id
@@ -316,12 +322,17 @@ pub fn show(
         ui.add_space(4.0);
     }
 
-    // Board list
-    if boards.is_empty() {
-        ui.label(RichText::new("No boards yet").color(ui.visuals().weak_text_color()));
-        ui.label(RichText::new("Click '+ New' to create one.").small());
-    } else {
-        for board in boards {
+    // Board list — scroll when many boards; keep within remaining sidebar height.
+    let boards_max_h = ui.available_height().max(80.0);
+    ScrollArea::vertical()
+        .id_salt("board_list")
+        .max_height(boards_max_h)
+        .show(ui, |ui| {
+            if boards.is_empty() {
+                ui.label(RichText::new("No boards yet").color(ui.visuals().weak_text_color()));
+                ui.label(RichText::new("Click '+ New' to create one.").small());
+            } else {
+                for board in boards {
             let is_selected = state
                 .selected_board_id
                 .as_ref()
@@ -366,6 +377,15 @@ pub fn show(
                                 });
                             }
                         });
+                        if is_selected {
+                            if ui
+                                .small_button("Del")
+                                .on_hover_text("Delete this board")
+                                .clicked()
+                            {
+                                output.delete_board_id = Some(board.board_id.clone());
+                            }
+                        }
                     });
                 })
                 .response
@@ -383,9 +403,10 @@ pub fn show(
                 output.board_deselected = true;
             }
 
-            ui.add_space(2.0);
-        }
-    }
+                    ui.add_space(2.0);
+                }
+            }
+        });
 
     ui.add_space(8.0);
     ui.separator();
@@ -426,6 +447,8 @@ pub struct SidebarOutput {
     pub board_deselected: bool,
     /// User wants to create a board with this title.
     pub create_board_title: Option<String>,
+    /// User requested deletion of this board id.
+    pub delete_board_id: Option<String>,
     /// User opened the graph explorer view.
     pub open_graph: bool,
     /// Repo/project filters changed.

@@ -77,14 +77,29 @@ pub fn show(ui: &mut Ui, state: &mut GraphViewState) -> GraphViewOutput {
 
     if state.nodes.is_empty() {
         ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() / 2.0 - 20.0);
+            ui.add_space(ui.available_height() / 2.0 - 60.0);
             ui.label(
                 egui::RichText::new("No graph nodes yet")
                     .color(ui.visuals().weak_text_color()),
             );
             ui.label(
-                egui::RichText::new("Click Refresh to load from /api/workspace/graph/explore")
-                    .small(),
+                egui::RichText::new(
+                    "This view is LadybugDB code/memory graph data — not your markdown notes list.",
+                )
+                .small(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "1) Set LADYBUG_DB_PATH when starting workspace-server  2) Diag tab → Ladybug: up  3) Click Refresh",
+                )
+                .small(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Canvas tab: pick a board under Boards (infinite canvas is there, not on Graph).",
+                )
+                .small()
+                .weak(),
             );
         });
         return output;

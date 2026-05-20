@@ -3,6 +3,7 @@
 pub mod camera;
 pub mod card;
 pub mod connector;
+pub mod markdown_preview;
 pub mod tools;
 
 use crate::model::{
@@ -12,14 +13,27 @@ use crate::model::{
 use crate::theme::color32;
 use crate::theme::palette;
 use camera::Camera;
-use card::{render_card, Edge};
+use card::{apply_resize_handle, ensure_card_dimensions, render_card, ResizeHandle};
 use connector::{render_connector, render_connection_preview};
 use egui::{Pos2, Ui, Vec2};
 use std::collections::HashMap;
 use tools::CanvasTool;
 
 const SAVE_DEBOUNCE_SECS: f32 = 2.0;
-const MIN_CARD_SIZE: f32 = 120.0;
+
+/// Copy `note_id` from persisted board rows when older tldraw JSON omitted it.
+fn hydrate_note_ids_from_board_objects(
+    doc: &mut WorkspaceCanvasDocument,
+    board: &WorkspaceBoard,
+) {
+    for row in &board.objects {
+        if let Some(obj) = doc.objects.get_mut(&row.object_id) {
+            if obj.note_id.is_none() {
+                obj.note_id = row.note_id.clone();
+            }
+        }
+    }
+}
 
 /// Content-only snapshot for undo (camera changes are excluded).
 #[derive(Debug, Clone)]
@@ -48,9 +62,10 @@ pub struct CanvasState {
     pub status_message: Option<(String, f32)>,
     undo_stack: Vec<CanvasUndoEntry>,
     pub save_debounce: f32,
-    pub resize_target: Option<(String, Edge)>,
+    pub active_resize: Option<(String, ResizeHandle)>,
     pub save_in_flight: bool,
     pub drag_mutation_started: bool,
+    pub show_grid: bool,
 }
 
 impl Default for CanvasState {
@@ -76,16 +91,17 @@ impl CanvasState {
             status_message: None,
             undo_stack: Vec::new(),
             save_debounce: 0.0,
-            resize_target: None,
+            active_resize: None,
             save_in_flight: false,
             drag_mutation_started: false,
+            show_grid: true,
         }
     }
 
     pub fn load_board(&mut self, board: &WorkspaceBoard) {
         self.board_id = Some(board.board_id.clone());
 
-        let doc: WorkspaceCanvasDocument =
+        let mut doc: WorkspaceCanvasDocument =
             serde_json::from_value(board.tldraw_document.clone()).unwrap_or_else(|_| {
                 WorkspaceCanvasDocument {
                     engine: AGENTIC_CANVAS_ENGINE.to_string(),
@@ -99,6 +115,11 @@ impl CanvasState {
                     connectors: HashMap::new(),
                 }
             });
+
+        hydrate_note_ids_from_board_objects(&mut doc, board);
+        for obj in doc.objects.values_mut() {
+            ensure_card_dimensions(obj);
+        }
 
         self.camera = Camera::from_model_camera(&doc.camera);
         self.canvas_doc = Some(doc);
@@ -208,6 +229,8 @@ pub struct CanvasOutput {
     pub save_board: Option<(String, WorkspaceCanvasDocument)>,
     pub ingest_board: bool,
     pub create_note_at: Option<Pos2>,
+    pub create_text_at: Option<Pos2>,
+    pub delete_selection: bool,
     pub open_note_id: Option<String>,
     pub dirty: bool,
 }
@@ -219,30 +242,89 @@ pub struct CanvasOutput {
 pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
     let mut output = CanvasOutput::default();
 
-    render_toolbar(ui, state, &mut output);
+    let panel_rect = ui.available_rect_before_wrap();
 
     let mut doc = match state.canvas_doc.take() {
         Some(doc) => doc,
         None => {
+            render_floating_toolbar(ui.ctx(), panel_rect, state, &mut output, false);
             ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() / 2.0 - 10.0);
+                ui.add_space(ui.available_height() / 2.0 - 30.0);
                 ui.label(
-                    egui::RichText::new("Select a board from the sidebar")
+                    egui::RichText::new("Select a board under Boards in the sidebar")
                         .color(ui.visuals().weak_text_color()),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Pan: middle-drag or Space+drag. Zoom: Ctrl+scroll. Note tool: click the canvas.",
+                    )
+                    .small()
+                    .weak(),
                 );
             });
             return output;
         }
     };
 
-    let rect = ui.max_rect();
+    let mut canvas_output = CanvasOutput::default();
+
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(panel_rect), |ui| {
+        let rect = ui.max_rect();
+        canvas_output = paint_canvas(ui, state, &mut doc, rect);
+    });
+
+    render_floating_toolbar(
+        ui.ctx(),
+        panel_rect,
+        state,
+        &mut output,
+        true,
+    );
+    output.merge_from(&canvas_output);
+
+    doc.camera = state.camera.to_model_camera();
+    state.canvas_doc = Some(doc);
+
+    if state.save_debounce_elapsed() {
+        queue_save(state, &mut output);
+    }
+
+    output
+}
+
+impl CanvasOutput {
+    fn merge_from(&mut self, other: &CanvasOutput) {
+        if other.save_board.is_some() {
+            self.save_board = other.save_board.clone();
+        }
+        if other.create_note_at.is_some() {
+            self.create_note_at = other.create_note_at;
+        }
+        if other.create_text_at.is_some() {
+            self.create_text_at = other.create_text_at;
+        }
+        if other.delete_selection {
+            self.delete_selection = true;
+        }
+        if other.open_note_id.is_some() {
+            self.open_note_id = other.open_note_id.clone();
+        }
+        if other.ingest_board {
+            self.ingest_board = true;
+        }
+        self.dirty |= other.dirty;
+    }
+}
+
+fn paint_canvas(ui: &mut Ui, state: &mut CanvasState, doc: &mut WorkspaceCanvasDocument, rect: egui::Rect) -> CanvasOutput {
+    let mut output = CanvasOutput::default();
 
     if ui.input(|i| i.modifiers.command || i.modifiers.ctrl) && ui.input(|i| i.key_pressed(egui::Key::Z))
     {
-        state.undo_doc(&mut doc);
+        state.undo_doc(doc);
     }
     if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
-        state.delete_selection_in_doc(&mut doc);
+        state.delete_selection_in_doc(doc);
     }
 
     let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -276,14 +358,16 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
         }
     }
 
-    render_grid(ui, &state.camera);
+    if state.show_grid {
+        render_grid(ui, &state.camera, rect);
+    }
 
     let mut hovered_object_id: Option<String> = None;
     let mut clicked_object_id: Option<String> = None;
     let mut double_clicked_note_id: Option<String> = None;
     let mut dragged_object_id: Option<(String, Vec2)> = None;
     let mut drag_started_on_card = false;
-    let mut resize_edge: Option<(String, Edge)> = None;
+    let mut frame_resize: Option<(String, ResizeHandle)> = None;
 
     let object_ids: Vec<String> = doc.objects.keys().cloned().collect();
 
@@ -294,7 +378,15 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
         let is_selected = state.selected_object_id.as_ref() == Some(obj_id);
         let is_hovered = hovered_object_id.as_ref() == Some(obj_id) || is_selected;
 
-        let interaction = render_card(ui, &obj, &state.camera, is_selected, is_hovered);
+        let interaction = render_card(
+            ui,
+            &obj,
+            &state.camera,
+            rect,
+            state.tool,
+            is_selected,
+            is_hovered,
+        );
 
         let w = if obj.w > 0.0 { obj.w } else { crate::model::NOTE_CARD_WIDTH };
         let h = if obj.h > 0.0 { obj.h } else { crate::model::NOTE_CARD_HEIGHT };
@@ -304,7 +396,7 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
             Vec2::new(w * state.camera.zoom, h * state.camera.zoom),
         );
 
-        if interaction.hover_edge.is_some()
+        if interaction.hover_resize.is_some()
             || interaction.pointer_pos.map_or(false, |p| card_rect.contains(p))
         {
             hovered_object_id = Some(obj_id.clone());
@@ -312,6 +404,13 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
 
         if interaction.clicked {
             clicked_object_id = Some(obj_id.clone());
+            if state.tool == CanvasTool::Select {
+                if let Some(handle) = interaction.hover_resize {
+                    state.selected_object_id = Some(obj_id.clone());
+                    state.active_resize = Some((obj_id.clone(), handle));
+                    frame_resize = Some((obj_id.clone(), handle));
+                }
+            }
         }
 
         if interaction.double_clicked {
@@ -320,13 +419,15 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
             }
         }
 
-        if let Some(drag_delta) = interaction.dragged {
-            if is_selected && interaction.hover_edge.is_some() {
-                resize_edge = Some((obj_id.clone(), interaction.hover_edge.unwrap()));
-            } else {
-                dragged_object_id = Some((obj_id.clone(), drag_delta));
-                drag_started_on_card = true;
-            }
+        if let Some((handle, drag_delta)) = interaction.resize_drag {
+            state.selected_object_id = Some(obj_id.clone());
+            dragged_object_id = Some((obj_id.clone(), drag_delta));
+            drag_started_on_card = true;
+            state.active_resize = Some((obj_id.clone(), handle));
+            frame_resize = Some((obj_id.clone(), handle));
+        } else if let Some(drag_delta) = interaction.dragged {
+            dragged_object_id = Some((obj_id.clone(), drag_delta));
+            drag_started_on_card = true;
         }
     }
 
@@ -341,7 +442,7 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
         let Some(ref to_obj) = doc.objects.get(&conn.to_object_id).cloned() else {
             continue;
         };
-        render_connector(ui, conn, from_obj, to_obj, &state.camera);
+        render_connector(ui, conn, from_obj, to_obj, &state.camera, rect);
 
         if state.tool == CanvasTool::Select {
             if let Some(p) = pointer {
@@ -385,17 +486,36 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
     if let Some((ref drag_id, delta)) = dragged_object_id {
         match state.tool {
             CanvasTool::Select => {
-                if let Some((ref obj_id, edge)) = resize_edge.or_else(|| state.resize_target.clone())
-                {
-                    if obj_id == drag_id {
-                        if state.resize_target.is_none() {
-                            state.push_undo_snapshot(&doc);
-                            state.resize_target = Some((obj_id.clone(), edge));
-                        }
-                        if let Some(obj) = doc.objects.get_mut(drag_id) {
-                            apply_resize(obj, edge, delta);
-                            state.mark_dirty();
-                        }
+                let resize_handle = frame_resize
+                    .as_ref()
+                    .filter(|(id, _)| id == drag_id)
+                    .map(|(_, h)| *h)
+                    .or_else(|| {
+                        state
+                            .active_resize
+                            .as_ref()
+                            .filter(|(id, _)| id == drag_id)
+                            .map(|(_, h)| *h)
+                    });
+                if let Some(handle) = resize_handle {
+                    if !state.drag_mutation_started {
+                        state.push_undo_snapshot(&doc);
+                        state.drag_mutation_started = true;
+                    }
+                    if let Some(obj) = doc.objects.get_mut(drag_id) {
+                        apply_resize_handle(obj, handle, delta);
+                        let w = if obj.w > 0.0 {
+                            obj.w
+                        } else {
+                            crate::model::NOTE_CARD_WIDTH
+                        };
+                        let h = if obj.h > 0.0 {
+                            obj.h
+                        } else {
+                            crate::model::NOTE_CARD_HEIGHT
+                        };
+                        state.set_status(format!("{w:.0} × {h:.0}"));
+                        state.mark_dirty();
                     }
                 } else if doc.objects.contains_key(drag_id) {
                     if !state.drag_mutation_started {
@@ -415,7 +535,7 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
     }
 
     if primary_released {
-        state.resize_target = None;
+        state.active_resize = None;
         state.drag_start = None;
         state.drag_mutation_started = false;
     }
@@ -472,13 +592,31 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
         }
     }
 
-    if state.tool == CanvasTool::Note && clicked_object_id.is_none() {
+    if matches!(state.tool, CanvasTool::Note | CanvasTool::Text)
+        && clicked_object_id.is_none()
+    {
         let bg_clicked = ui.interact(rect, ui.id().with("canvas_bg_click"), egui::Sense::click());
         if bg_clicked.clicked() {
             if let Some(p) = pointer {
-                output.create_note_at = Some(state.camera.screen_to_world(p, &rect));
-                state.set_status("Creating note…");
+                let world = state.camera.screen_to_world(p, &rect);
+                match state.tool {
+                    CanvasTool::Note => {
+                        output.create_note_at = Some(world);
+                        state.set_status("Creating note…");
+                    }
+                    CanvasTool::Text => {
+                        output.create_text_at = Some(world);
+                    }
+                    _ => {}
+                }
             }
+        }
+    }
+
+    if state.tool.is_shape_placeholder() && clicked_object_id.is_none() {
+        let bg_clicked = ui.interact(rect, ui.id().with("canvas_bg_shape"), egui::Sense::click());
+        if bg_clicked.clicked() {
+            state.set_status("Shapes: use Draw tab → Excalidraw bridge (agentic_canvas is note cards only)");
         }
     }
 
@@ -496,11 +634,6 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
     output.open_note_id = double_clicked_note_id;
 
     doc.camera = state.camera.to_model_camera();
-    state.canvas_doc = Some(doc);
-
-    if state.save_debounce_elapsed() {
-        queue_save(state, &mut output);
-    }
 
     if let Some((ref msg, _)) = state.status_message {
         let status_rect = rect.intersect(egui::Rect::from_min_size(
@@ -519,42 +652,118 @@ pub fn show(ui: &mut Ui, state: &mut CanvasState) -> CanvasOutput {
     output
 }
 
-fn render_toolbar(ui: &mut Ui, state: &mut CanvasState, output: &mut CanvasOutput) {
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut state.tool, CanvasTool::Select, "Select");
-        ui.selectable_value(&mut state.tool, CanvasTool::Pan, "Pan");
-        ui.selectable_value(&mut state.tool, CanvasTool::Connect, "Connect");
-        ui.selectable_value(&mut state.tool, CanvasTool::Note, "Note");
+/// Floating bottom toolbar (Excalidraw-style). Rendered in foreground so it receives clicks.
+fn render_floating_toolbar(
+    ctx: &egui::Context,
+    canvas_rect: egui::Rect,
+    state: &mut CanvasState,
+    output: &mut CanvasOutput,
+    board_loaded: bool,
+) {
+    const BAR_W: f32 = 520.0;
+    const BAR_H: f32 = 46.0;
+    let pos = egui::pos2(
+        canvas_rect.center().x - BAR_W * 0.5,
+        canvas_rect.max.y - BAR_H - 14.0,
+    );
 
-        ui.separator();
+    egui::Area::new(egui::Id::new("canvas_floating_toolbar"))
+        .order(egui::Order::Foreground)
+        .interactable(true)
+        .fixed_pos(pos)
+        .show(ctx, |ui| {
+            let frame_fill = color32(palette::BG_ELEVATED);
+            let stroke = egui::Stroke::new(1.0, color32(palette::BORDER));
+            egui::Frame::none()
+                .fill(frame_fill)
+                .stroke(stroke)
+                .rounding(egui::Rounding::same(14.0))
+                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                .show(ui, |ui| {
+                    ui.set_width(BAR_W);
+                    ui.add_enabled_ui(board_loaded, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Tools")
+                                .small()
+                                .color(color32(palette::TEXT_SECONDARY)),
+                        );
+                        ui.separator();
 
-        let save_enabled = state.dirty && !state.save_in_flight;
-        if ui
-            .add_enabled(save_enabled, egui::Button::new("Save"))
-            .clicked()
-        {
-            queue_save(state, output);
-        }
+                        for tool in [
+                            CanvasTool::Select,
+                            CanvasTool::Pan,
+                            CanvasTool::Connect,
+                            CanvasTool::Rectangle,
+                            CanvasTool::Circle,
+                            CanvasTool::Diamond,
+                            CanvasTool::Arrow,
+                            CanvasTool::Text,
+                            CanvasTool::Note,
+                        ] {
+                            let selected = state.tool == tool;
+                            let label = if tool.is_shape_placeholder() {
+                                format!("{}*", tool.label())
+                            } else {
+                                tool.label().to_string()
+                            };
+                            let tip = if tool.is_shape_placeholder() {
+                                format!("{label} — shapes live on Draw / Excalidraw tab")
+                            } else {
+                                label.clone()
+                            };
+                            if ui
+                                .add(
+                                    egui::Button::new(&label)
+                                        .min_size(egui::vec2(36.0, 28.0))
+                                        .selected(selected),
+                                )
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                state.tool = tool;
+                            }
+                        }
 
-        if ui.button("Ingest board").clicked() {
-            output.ingest_board = true;
-        }
+                        ui.separator();
 
-        if state.save_in_flight {
-            ui.label(egui::RichText::new("Saving…").color(color32(palette::TEXT_SECONDARY)));
-        } else if state.dirty {
-            ui.label(
-                egui::RichText::new("● Unsaved changes")
-                    .color(color32(palette::ACCENT_PRIMARY)),
-            );
-        } else {
-            ui.label(
-                egui::RichText::new("Saved")
-                    .color(color32(palette::TEXT_SECONDARY)),
-            );
-        }
-    });
-    ui.separator();
+                        let grid_on = state.show_grid;
+                        if ui
+                            .add(
+                                egui::Button::new("#")
+                                    .min_size(egui::vec2(28.0, 28.0))
+                                    .selected(grid_on),
+                            )
+                            .on_hover_text("Toggle grid")
+                            .clicked()
+                        {
+                            state.show_grid = !state.show_grid;
+                        }
+
+                        if ui
+                            .add(egui::Button::new("🗑").min_size(egui::vec2(28.0, 28.0)))
+                            .on_hover_text("Delete selection")
+                            .clicked()
+                        {
+                            output.delete_selection = true;
+                        }
+
+                        ui.separator();
+
+                        let save_enabled = state.dirty && !state.save_in_flight;
+                        if ui
+                            .add_enabled(save_enabled, egui::Button::new("Save"))
+                            .clicked()
+                        {
+                            queue_save(state, output);
+                        }
+                        if ui.button("Ingest").clicked() {
+                            output.ingest_board = true;
+                        }
+                    });
+                    });
+                });
+        });
 }
 
 fn queue_save(state: &mut CanvasState, output: &mut CanvasOutput) {
@@ -566,29 +775,7 @@ fn queue_save(state: &mut CanvasState, output: &mut CanvasOutput) {
     }
 }
 
-fn apply_resize(obj: &mut crate::model::CanvasObject, edge: Edge, delta: Vec2) {
-    match edge {
-        Edge::Right => {
-            obj.w = (obj.w + delta.x).max(MIN_CARD_SIZE);
-        }
-        Edge::Bottom => {
-            obj.h = (obj.h + delta.y).max(MIN_CARD_SIZE);
-        }
-        Edge::Left => {
-            let new_w = (obj.w - delta.x).max(MIN_CARD_SIZE);
-            obj.x += obj.w - new_w;
-            obj.w = new_w;
-        }
-        Edge::Top => {
-            let new_h = (obj.h - delta.y).max(MIN_CARD_SIZE);
-            obj.y += obj.h - new_h;
-            obj.h = new_h;
-        }
-    }
-}
-
-fn render_grid(ui: &mut Ui, camera: &Camera) {
-    let rect = ui.max_rect();
+fn render_grid(ui: &mut Ui, camera: &Camera, rect: egui::Rect) {
     let grid_spacing = 50.0;
     let dot_radius = 1.0;
     let dot_color = {
@@ -612,6 +799,65 @@ fn render_grid(ui: &mut Ui, camera: &Camera) {
                 ui.painter().circle_filled(screen_pos, dot_radius, dot_color);
             }
         }
+    }
+}
+
+/// Add a text card at a world position (synchronous).
+pub fn add_text_card_at(state: &mut CanvasState, world_pos: Pos2) {
+    let Some(doc) = state.canvas_doc.clone() else {
+        return;
+    };
+    state.push_undo_snapshot(&doc);
+    let updated = crate::model::add_text_card_to_canvas_document(&doc, (world_pos.x, world_pos.y));
+    let selected_id = updated
+        .objects
+        .values()
+        .last()
+        .map(|o| o.id.clone());
+    state.canvas_doc = Some(updated);
+    if let Some(obj_id) = selected_id {
+        state.selected_object_id = Some(obj_id);
+    }
+    state.mark_dirty();
+    state.set_status("Text card added");
+}
+
+/// Delete the current selection on the loaded board.
+pub fn delete_selection_on_canvas(state: &mut CanvasState) {
+    let Some(mut doc) = state.canvas_doc.take() else {
+        return;
+    };
+    state.delete_selection_in_doc(&mut doc);
+    state.canvas_doc = Some(doc);
+}
+
+/// Refresh every note-backed card from the canonical note list.
+pub fn sync_all_note_cards(state: &mut CanvasState, notes: &[crate::model::WorkspaceNoteDocument]) {
+    for note in notes {
+        sync_note_card_from_note(state, note);
+    }
+}
+
+/// Refresh canvas card text from the canonical note document (after save in Notes tab).
+pub fn sync_note_card_from_note(state: &mut CanvasState, note: &crate::model::WorkspaceNoteDocument) {
+    let Some(mut doc) = state.canvas_doc.clone() else {
+        return;
+    };
+    let mut changed = false;
+    for obj in doc.objects.values_mut() {
+        if obj.note_id.as_deref() != Some(note.note_id.as_str()) {
+            continue;
+        }
+        obj.title = note.title.clone();
+        obj.summary = note.summary.clone().unwrap_or_default();
+        obj.markdown_preview = crate::model::build_markdown_preview(&note.body_markdown);
+        obj.tags = note.tags.clone();
+        ensure_card_dimensions(obj);
+        changed = true;
+    }
+    if changed {
+        state.canvas_doc = Some(doc);
+        state.mark_dirty();
     }
 }
 

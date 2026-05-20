@@ -144,6 +144,16 @@ pub fn get_board(
     Ok(Some(board))
 }
 
+/// Delete a board JSON file from the store.
+pub fn delete_board(store_root: &str, workspace_id: &str, board_id: &str) -> Result<(), String> {
+    let json_path = vault::board_json_path(store_root, workspace_id, board_id);
+    if !json_path.exists() {
+        return Err(format!("board not found: {}", board_id));
+    }
+    std::fs::remove_file(&json_path).map_err(|e| format!("delete board: {}", e))?;
+    Ok(())
+}
+
 /// List all boards for a workspace.
 pub fn list_boards(
     store_root: &str,

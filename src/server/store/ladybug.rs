@@ -457,20 +457,113 @@ fn make_entity_node(name: &str) -> WorkspaceGraphNode {
     }
 }
 
+// ── Graph schema detection ───────────────────────────────────────────
+
+/// Ladybug graph layout backing the workspace Graph tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphDbSchema {
+    /// Workspace / memory ingest: `GraphNode` + `GraphRel`.
+    Workspace,
+    /// Code index (`CODE_SCHEMA`): `File`, `Function`, `Class`, `Chunk`, …
+    Code,
+}
+
+fn query_scalar_count(db: &LadybugDb, sql: &str) -> Result<i64, String> {
+    let rows = query_single_string_column(db, sql)?;
+    rows.first()
+        .and_then(|s| s.parse::<i64>().ok())
+        .ok_or_else(|| format!("expected scalar count from query: {sql}"))
+}
+
+fn try_scalar_count(db: &LadybugDb, sql: &str) -> i64 {
+    query_scalar_count(db, sql).unwrap_or(0)
+}
+
+/// Pick workspace vs code schema by checking which node tables have rows.
+fn detect_graph_schema(db: &LadybugDb) -> GraphDbSchema {
+    let workspace_count = try_scalar_count(db, "MATCH (n:GraphNode) RETURN count(n);");
+    if workspace_count > 0 {
+        return GraphDbSchema::Workspace;
+    }
+    let code_count = try_scalar_count(db, "MATCH (f:File) RETURN count(f);");
+    if code_count > 0 {
+        return GraphDbSchema::Code;
+    }
+    GraphDbSchema::Workspace
+}
+
+fn code_repo_filter(alias: &str, repo_id: Option<&str>) -> String {
+    match repo_id {
+        Some(repo) if !repo.is_empty() => {
+            format!(r#"WHERE {}.repo_id = "{}""#, alias, escape_cypher(repo))
+        }
+        _ => String::new(),
+    }
+}
+
+fn merge_sample_rows(
+    target: &mut Vec<(String, String, String)>,
+    rows: Vec<(String, String, String)>,
+) {
+    for row in rows {
+        if !target.contains(&row) {
+            target.push(row);
+        }
+    }
+}
+
+fn collect_endpoint_ids(sample_rows: &[(String, String, String)]) -> Vec<String> {
+    let mut endpoint_ids: Vec<String> = Vec::new();
+    for (s, t, _) in sample_rows {
+        if !endpoint_ids.contains(s) {
+            endpoint_ids.push(s.clone());
+        }
+        if !endpoint_ids.contains(t) {
+            endpoint_ids.push(t.clone());
+        }
+    }
+    endpoint_ids
+}
+
+fn append_density_edges(
+    edges: &mut Vec<WorkspaceGraphEdge>,
+    density_rows: &[(String, String, String)],
+) {
+    for (s, t, r) in density_rows {
+        let from = format!("ladybug:{}", s);
+        let to = format!("ladybug:{}", t);
+        let edge_id = format!("{}--{}--{}", from, r, to);
+        if !edges.iter().any(|e| e.edge_id == edge_id) {
+            edges.push(make_edge(&from, &to, r));
+        }
+    }
+}
+
 // ── Explore graph ────────────────────────────────────────────────────
 
 /// Random sample of the graph, optionally scoped by repo/project.
 ///
-/// 1. Sample relationships (scoped or unscoped).
-/// 2. Fetch node details for all endpoints.
-/// 3. Density boost — add all relationships among collected endpoints.
+/// Auto-detects workspace (`GraphNode`) vs code (`File`/`Function`/…) schema.
+/// Returns `(nodes, edges, seed_title)`.
 pub fn explore_graph(
     db: &LadybugDb,
     limit: i64,
     repo_id: Option<&str>,
     project_id: Option<&str>,
-) -> Result<(Vec<WorkspaceGraphNode>, Vec<WorkspaceGraphEdge>), String> {
-    // Step 1: sample relationships
+) -> Result<(Vec<WorkspaceGraphNode>, Vec<WorkspaceGraphEdge>, &'static str), String> {
+    match detect_graph_schema(db) {
+        GraphDbSchema::Workspace => explore_workspace_graph(db, limit, repo_id, project_id),
+        GraphDbSchema::Code => explore_code_graph(db, limit, repo_id),
+    }
+}
+
+/// Workspace / memory graph: `GraphNode` + `GraphRel`.
+fn explore_workspace_graph(
+    db: &LadybugDb,
+    limit: i64,
+    repo_id: Option<&str>,
+    project_id: Option<&str>,
+) -> Result<(Vec<WorkspaceGraphNode>, Vec<WorkspaceGraphEdge>, &'static str), String> {
     let sample_sql = if let (Some(repo), Some(proj)) = (repo_id, project_id) {
         format!(
             r#"MATCH (source:GraphNode)-[r:GraphRel]->(target:GraphNode)
@@ -491,32 +584,17 @@ LIMIT {};"#,
     };
 
     let sample_rows: Vec<(String, String, String)> = query_rows_3(db, &sample_sql)?;
-
     if sample_rows.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), "Graph Explorer"));
     }
 
-    // Collect endpoint IDs
-    let mut endpoint_ids: Vec<String> = Vec::new();
-    for (s, t, _) in &sample_rows {
-        if !endpoint_ids.contains(s) {
-            endpoint_ids.push(s.clone());
-        }
-        if !endpoint_ids.contains(t) {
-            endpoint_ids.push(t.clone());
-        }
-    }
-
-    // Step 2: fetch node details
+    let endpoint_ids = collect_endpoint_ids(&sample_rows);
     let nodes = fetch_node_details(db, &endpoint_ids)?;
-
-    // Build sample edges (using ladybug: prefixed IDs)
     let mut edges: Vec<WorkspaceGraphEdge> = sample_rows
         .iter()
         .map(|(s, t, r)| make_edge(&format!("ladybug:{}", s), &format!("ladybug:{}", t), r))
         .collect();
 
-    // Step 3: density boost — all relationships among endpoints
     if endpoint_ids.len() > 1 {
         let id_list = endpoint_ids
             .iter()
@@ -529,21 +607,170 @@ WHERE a.node_id IN [{}] AND b.node_id IN [{}]
 RETURN a.node_id AS source_id, b.node_id AS target_id, r.rel_type AS type;"#,
             id_list, id_list
         );
+        append_density_edges(&mut edges, &query_rows_3(db, &density_sql)?);
+    }
 
-        let density_rows: Vec<(String, String, String)> = query_rows_3(db, &density_sql)?;
+    Ok((nodes, edges, "Graph Explorer"))
+}
 
-        // Only add edges we don't already have
-        for (s, t, r) in &density_rows {
-            let from = format!("ladybug:{}", s);
-            let to = format!("ladybug:{}", t);
-            let edge_id = format!("{}--{}--{}", from, r, to);
-            if !edges.iter().any(|e| e.edge_id == edge_id) {
-                edges.push(make_edge(&from, &to, r));
-            }
+/// Code graph (`CODE_SCHEMA`): sample `DEFINES`, `IMPORTS`, `CALLS`, `HAS_METHOD`.
+fn explore_code_graph(
+    db: &LadybugDb,
+    limit: i64,
+    repo_id: Option<&str>,
+) -> Result<(Vec<WorkspaceGraphNode>, Vec<WorkspaceGraphEdge>, &'static str), String> {
+    let per_rel = std::cmp::max(1, limit / 4);
+    let mut sample_rows: Vec<(String, String, String)> = Vec::new();
+
+    let defines_filter = code_repo_filter("source", repo_id);
+    merge_sample_rows(
+        &mut sample_rows,
+        query_rows_3(
+            db,
+            &format!(
+                r#"MATCH (source:File)-[:DEFINES]->(target)
+{defines_filter}
+RETURN source.id AS source_id, target.id AS target_id, "DEFINES" AS type
+LIMIT {per_rel};"#
+            ),
+        )?,
+    );
+
+    let imports_filter = code_repo_filter("source", repo_id);
+    merge_sample_rows(
+        &mut sample_rows,
+        query_rows_3(
+            db,
+            &format!(
+                r#"MATCH (source:File)-[:IMPORTS]->(target:File)
+{imports_filter}
+RETURN source.id AS source_id, target.id AS target_id, "IMPORTS" AS type
+LIMIT {per_rel};"#
+            ),
+        )?,
+    );
+
+    let calls_filter = code_repo_filter("source", repo_id);
+    merge_sample_rows(
+        &mut sample_rows,
+        query_rows_3(
+            db,
+            &format!(
+                r#"MATCH (source:Function)-[:CALLS]->(target:Function)
+{calls_filter}
+RETURN source.id AS source_id, target.id AS target_id, "CALLS" AS type
+LIMIT {per_rel};"#
+            ),
+        )?,
+    );
+
+    let methods_filter = code_repo_filter("source", repo_id);
+    merge_sample_rows(
+        &mut sample_rows,
+        query_rows_3(
+            db,
+            &format!(
+                r#"MATCH (source:Class)-[:HAS_METHOD]->(target:Function)
+{methods_filter}
+RETURN source.id AS source_id, target.id AS target_id, "HAS_METHOD" AS type
+LIMIT {per_rel};"#
+            ),
+        )?,
+    );
+
+    if sample_rows.is_empty() {
+        return Ok((Vec::new(), Vec::new(), "Code Graph Explorer"));
+    }
+
+    let endpoint_ids = collect_endpoint_ids(&sample_rows);
+    let nodes = fetch_code_node_details(db, &endpoint_ids)?;
+    let mut edges: Vec<WorkspaceGraphEdge> = sample_rows
+        .iter()
+        .map(|(s, t, r)| make_edge(&format!("ladybug:{}", s), &format!("ladybug:{}", t), r))
+        .collect();
+
+    if endpoint_ids.len() > 1 {
+        let id_list = endpoint_ids
+            .iter()
+            .map(|id| format!("\"{}\"", escape_cypher(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for (pattern, rel_type) in [
+            (
+                r#"MATCH (a:File)-[:DEFINES]->(b)
+WHERE a.id IN [{ids}] AND b.id IN [{ids}]
+RETURN a.id AS source_id, b.id AS target_id, "DEFINES" AS type;"#,
+                "DEFINES",
+            ),
+            (
+                r#"MATCH (a:File)-[:IMPORTS]->(b:File)
+WHERE a.id IN [{ids}] AND b.id IN [{ids}]
+RETURN a.id AS source_id, b.id AS target_id, "IMPORTS" AS type;"#,
+                "IMPORTS",
+            ),
+            (
+                r#"MATCH (a:Function)-[:CALLS]->(b:Function)
+WHERE a.id IN [{ids}] AND b.id IN [{ids}]
+RETURN a.id AS source_id, b.id AS target_id, "CALLS" AS type;"#,
+                "CALLS",
+            ),
+            (
+                r#"MATCH (a:Class)-[:HAS_METHOD]->(b:Function)
+WHERE a.id IN [{ids}] AND b.id IN [{ids}]
+RETURN a.id AS source_id, b.id AS target_id, "HAS_METHOD" AS type;"#,
+                "HAS_METHOD",
+            ),
+        ] {
+            let _ = rel_type;
+            let density_sql = pattern.replace("{ids}", &id_list);
+            append_density_edges(&mut edges, &query_rows_3(db, &density_sql)?);
         }
     }
 
-    Ok((nodes, edges))
+    Ok((nodes, edges, "Code Graph Explorer"))
+}
+
+/// Fetch `File` / `Function` / `Class` rows for code-graph endpoint ids.
+fn fetch_code_node_details(
+    db: &LadybugDb,
+    node_ids: &[String],
+) -> Result<Vec<WorkspaceGraphNode>, String> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let id_list = node_ids
+        .iter()
+        .map(|id| format!("\"{}\"", escape_cypher(id)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!(
+        r#"MATCH (f:File) WHERE f.id IN [{id_list}]
+RETURN f.id AS node_id, "File" AS primary_label, f.name AS name,
+       f.path AS path, "" AS qualified_name, f.repo_id AS repo_id, "" AS project_id, f.text AS text
+UNION ALL
+MATCH (fn:Function) WHERE fn.id IN [{id_list}]
+RETURN fn.id AS node_id, "Function" AS primary_label, fn.name AS name,
+       fn.path AS path, fn.qualified_name AS qualified_name, fn.repo_id AS repo_id, "" AS project_id, fn.text AS text
+UNION ALL
+MATCH (c:Class) WHERE c.id IN [{id_list}]
+RETURN c.id AS node_id, "Class" AS primary_label, c.name AS name,
+       c.path AS path, c.qualified_name AS qualified_name, c.repo_id AS repo_id, "" AS project_id, c.text AS text;"#
+    );
+
+    let mut nodes = query_node_detail_rows(db, &sql)?;
+    for node in &mut nodes {
+        if node.subtitle.as_deref() == Some("") {
+            node.subtitle = None;
+        }
+        if let Some(obj) = node.metadata.as_object_mut() {
+            if obj.get("project_id").and_then(|v| v.as_str()) == Some("") {
+                obj.remove("project_id");
+            }
+        }
+    }
+    Ok(nodes)
 }
 
 // ── Fetch node details ───────────────────────────────────────────────
@@ -654,22 +881,36 @@ RETURN source.name AS source, target.name AS target, r.rel_type AS type LIMIT {}
 
 // ── Repos & projects ─────────────────────────────────────────────────
 
-/// List repositories from LadybugDB.
+/// List repositories from LadybugDB (workspace `GraphNode` or code `File` tables).
 pub fn list_repos(db: &LadybugDb, limit: i64) -> Result<Vec<(String, i64)>, String> {
-    let sql = format!(
-        r#"MATCH (n:GraphNode)
+    let sql = match detect_graph_schema(db) {
+        GraphDbSchema::Workspace => format!(
+            r#"MATCH (n:GraphNode)
 WHERE n.repo_id IS NOT NULL
 RETURN n.repo_id AS repo_id, count(n) AS count
 ORDER BY count DESC
 LIMIT {};"#,
-        limit
-    );
+            limit
+        ),
+        GraphDbSchema::Code => format!(
+            r#"MATCH (f:File)
+WHERE f.repo_id IS NOT NULL AND f.repo_id <> ""
+RETURN f.repo_id AS repo_id, count(f) AS count
+ORDER BY count DESC
+LIMIT {};"#,
+            limit
+        ),
+    };
 
     query_repo_project_counts(db, &sql)
 }
 
-/// List projects from LadybugDB.
+/// List projects from LadybugDB (workspace schema only; code index has no project_id).
 pub fn list_projects(db: &LadybugDb, limit: i64) -> Result<Vec<(String, i64)>, String> {
+    if detect_graph_schema(db) == GraphDbSchema::Code {
+        return Ok(Vec::new());
+    }
+
     let sql = format!(
         r#"MATCH (n:GraphNode)
 WHERE n.project_id IS NOT NULL AND n.project_id <> ''
@@ -973,6 +1214,20 @@ mod tests {
         let kw = extract_keywords(title, 3);
         assert_eq!(kw.len(), 3);
         assert_eq!(kw, vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn test_code_repo_filter_empty() {
+        assert_eq!(code_repo_filter("source", None), "");
+        assert_eq!(code_repo_filter("source", Some("")), "");
+    }
+
+    #[test]
+    fn test_code_repo_filter_with_repo() {
+        assert_eq!(
+            code_repo_filter("source", Some("my-repo")),
+            r#"WHERE source.repo_id = "my-repo""#
+        );
     }
 
     #[test]

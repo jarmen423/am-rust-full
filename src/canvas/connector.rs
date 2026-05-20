@@ -19,8 +19,9 @@ pub fn render_connector(
     from_obj: &CanvasObject,
     to_obj: &CanvasObject,
     camera: &Camera,
+    viewport: egui::Rect,
 ) {
-    let rect = ui.max_rect();
+    let rect = viewport;
 
     // ── Source and target centres in screen space ─────────────────────
     let from_screen = camera.world_to_screen(Pos2::new(from_obj.x, from_obj.y), &rect);

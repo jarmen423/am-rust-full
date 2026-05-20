@@ -6,7 +6,7 @@ pub mod notes;
 pub mod query;
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use std::sync::Arc;
@@ -38,7 +38,12 @@ pub fn create_routes(state: Arc<WorkspaceState>) -> Router {
         .route("/api/workspace/notes/{id}/revert", post(notes::note_revert))
         // ── Boards ─────────────────────────────────────────────────
         .route("/api/workspace/boards", get(boards::list_boards).post(boards::create_board))
-        .route("/api/workspace/boards/{id}", get(boards::get_board).put(boards::update_board))
+        .route(
+            "/api/workspace/boards/{id}",
+            get(boards::get_board)
+                .put(boards::update_board)
+                .delete(boards::delete_board),
+        )
         .route("/api/workspace/boards/{id}/ingest", post(boards::ingest_board))
         .route("/api/workspace/boards/{id}/ingest-selection", post(boards::ingest_selection))
         // ── Graph (Phase 4 — LadybugDB integration) ────────────────

@@ -119,9 +119,9 @@ pub async fn graph_explore(
     };
 
     match lbug_result {
-        Ok((nodes, edges)) => {
+        Ok((nodes, edges, title)) => {
             info!(node_count = nodes.len(), edge_count = edges.len(), "graph explore returned");
-            graph_response("explore", "root", "Graph Explorer", nodes, edges)
+            graph_response("explore", "root", title, nodes, edges)
         }
         Err(_) => {
             // Fallback: empty graph

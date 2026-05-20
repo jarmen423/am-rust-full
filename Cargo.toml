@@ -114,3 +114,6 @@ web-sys = { version = "0.3", features = ["Document", "Element", "HtmlCanvasEleme
 
 [dev-dependencies]
 tempfile = "3"
+
+# Standalone workspace root — parent `agentic-memory/Cargo.toml` is a separate Rust workspace.
+[workspace]

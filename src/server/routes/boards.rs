@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use tracing::{debug, error, info, instrument, warn};
@@ -29,7 +30,9 @@ pub struct UpdateBoardRequest {
     pub workspace_id: String,
     pub title: String,
     pub tldraw_document: serde_json::Value,
+    #[serde(default)]
     pub objects: Vec<WorkspaceBoardObject>,
+    #[serde(default)]
     pub connectors: Vec<WorkspaceConnector>,
     pub description: Option<String>,
     pub tags: Option<Vec<String>>,
@@ -194,6 +197,54 @@ pub async fn update_board(
             }))
         }
     }
+}
+
+/// Delete a board from the workspace store.
+#[instrument(skip(state))]
+pub async fn delete_board(
+    State(state): State<Arc<WorkspaceState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let store_root = &state.config.store_path;
+    let store = std::path::Path::new(store_root);
+    if store.exists() {
+        for entry in std::fs::read_dir(store).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "status": "error", "message": e.to_string() })),
+            )
+        })? {
+            let entry = entry.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "status": "error", "message": e.to_string() })),
+                )
+            })?;
+            let ws_id = entry.file_name().to_string_lossy().to_string();
+            let json_path = crate::store::vault::board_json_path(store_root, &ws_id, &id);
+            if json_path.exists() {
+                store::delete_board(store_root, &ws_id, &id).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "status": "error", "message": e })),
+                    )
+                })?;
+                info!(board_id = %id, workspace_id = %ws_id, "board deleted");
+                return Ok(Json(serde_json::json!({
+                    "status": "ok",
+                    "board_id": id,
+                    "workspace_id": ws_id
+                })));
+            }
+        }
+    }
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "status": "error",
+            "message": format!("board not found: {}", id)
+        })),
+    ))
 }
 
 /// Ingest an entire board — persists an ingest receipt under the workspace vault.

@@ -46,6 +46,7 @@ pub struct WorkspaceApp {
     board_load_promise: api::SharedPromise<WorkspaceBoard>,
     board_save_promise: api::SharedPromise<WorkspaceBoard>,
     board_create_promise: api::SharedPromise<WorkspaceBoard>,
+    board_delete_promise: api::SharedPromise<bool>,
     graph_promise: api::SharedPromise<crate::model::GraphResponse>,
     current_board: Option<WorkspaceBoard>,
     bootstrapped: bool,
@@ -63,6 +64,7 @@ pub struct WorkspaceApp {
     agent_chat_promise: api::SharedPromise<crate::model::AgentChatResponse>,
     pending_agent_message: Option<String>,
     ingest_promise: api::SharedPromise<crate::model::WorkspaceIngestPayload>,
+    pending_boards_refresh: bool,
 }
 
 impl WorkspaceApp {
@@ -85,6 +87,7 @@ impl WorkspaceApp {
             board_load_promise: Arc::new(Mutex::new(api::Promise::Idle)),
             board_save_promise: Arc::new(Mutex::new(api::Promise::Idle)),
             board_create_promise: Arc::new(Mutex::new(api::Promise::Idle)),
+            board_delete_promise: Arc::new(Mutex::new(api::Promise::Idle)),
             graph_promise: Arc::new(Mutex::new(api::Promise::Idle)),
             current_board: None,
             bootstrapped: false,
@@ -102,6 +105,7 @@ impl WorkspaceApp {
             agent_chat_promise: Arc::new(Mutex::new(api::Promise::Idle)),
             pending_agent_message: None,
             ingest_promise: Arc::new(Mutex::new(api::Promise::Idle)),
+            pending_boards_refresh: false,
         }
     }
 
@@ -167,7 +171,43 @@ impl WorkspaceApp {
         api::fetch_graph_explore(&self.api_scope, self.graph_promise.clone(), ctx);
     }
 
-    fn poll_promises(&mut self) {
+    /// Push the in-memory canvas document to the server (e.g. after a note save updates card text).
+    fn flush_canvas_board_save(&mut self, ctx: &Context) {
+        let Some(board) = self.current_board.clone() else {
+            return;
+        };
+        let Some(doc) = self.canvas.save_document() else {
+            return;
+        };
+        if self.canvas.save_in_flight {
+            self.canvas.save_debounce = 0.0;
+            return;
+        }
+
+        self.canvas.begin_save();
+        let artifacts = crate::model::derive_workspace_artifacts_from_canvas_document(
+            &doc,
+            &board.board_id,
+            &board.workspace_id,
+            board.project_id.as_deref(),
+        );
+        let tldraw_value = serde_json::to_value(&doc).unwrap_or(serde_json::Value::Null);
+        api::save_board(
+            &board.board_id,
+            &board.workspace_id,
+            &board.title,
+            &tldraw_value,
+            artifacts.objects,
+            artifacts.connectors,
+            self.board_save_promise.clone(),
+            ctx,
+        );
+        if let Some(ref mut current) = self.current_board {
+            current.tldraw_document = tldraw_value;
+        }
+    }
+
+    fn poll_promises(&mut self, ctx: &Context) {
         {
             let mut lock = self.notes_promise.lock();
             if let Some(notes) = lock.take() {
@@ -213,17 +253,24 @@ impl WorkspaceApp {
                     self.app_view = AppView::Editor;
                     self.editor.set_status("Note created.");
                 }
+                canvas::sync_note_card_from_note(&mut self.canvas, &note);
+                self.flush_canvas_board_save(ctx);
                 self.refresh_notes_after_change();
             }
         }
 
         {
-            let mut lock = self.save_promise.lock();
-            if let Some(note) = lock.take() {
+            let note_done = {
+                let mut lock = self.save_promise.lock();
+                lock.take()
+            };
+            if let Some(note) = note_done {
                 self.editor.load_note(&note);
                 if let Some(idx) = self.notes.iter().position(|n| n.note_id == note.note_id) {
-                    self.notes[idx] = note;
+                    self.notes[idx] = note.clone();
                 }
+                canvas::sync_note_card_from_note(&mut self.canvas, &note);
+                self.flush_canvas_board_save(ctx);
                 self.editor.set_status("Saved.");
             }
         }
@@ -243,8 +290,10 @@ impl WorkspaceApp {
             if let Some(note) = note_done {
                 self.editor.load_note(&note);
                 if let Some(idx) = self.notes.iter().position(|n| n.note_id == note.note_id) {
-                    self.notes[idx] = note;
+                    self.notes[idx] = note.clone();
                 }
+                canvas::sync_note_card_from_note(&mut self.canvas, &note);
+                self.flush_canvas_board_save(ctx);
                 self.editor.set_status("Reverted to selected revision.");
                 self.refresh_notes_after_change();
             }
@@ -254,6 +303,7 @@ impl WorkspaceApp {
             let mut lock = self.board_load_promise.lock();
             if let Some(board) = lock.take() {
                 self.canvas.load_board(&board);
+                canvas::sync_all_note_cards(&mut self.canvas, &self.notes);
                 self.current_board = Some(board);
                 self.app_view = AppView::Canvas;
             }
@@ -265,13 +315,23 @@ impl WorkspaceApp {
                 self.current_board = Some(board.clone());
                 self.canvas.mark_saved();
                 self.canvas.status_message = Some(("Board saved.".to_string(), 3.0));
-            } else if let api::Promise::Failed(_) = &*lock {
-                let failed = lock.take();
-                if failed.is_some() {
-                    self.canvas.save_in_flight = false;
-                    self.canvas.status_message =
-                        Some(("Board save failed.".to_string(), 3.0));
-                }
+            } else if let api::Promise::Failed(msg) = std::mem::replace(&mut *lock, api::Promise::Idle)
+            {
+                self.canvas.save_in_flight = false;
+                self.canvas.status_message =
+                    Some((format!("Board save failed: {msg}"), 5.0));
+            }
+        }
+
+        {
+            let mut lock = self.board_delete_promise.lock();
+            if let api::Promise::Ready(true) = std::mem::replace(&mut *lock, api::Promise::Idle) {
+                self.pending_boards_refresh = true;
+            } else if let api::Promise::Failed(msg) =
+                std::mem::replace(&mut *lock, api::Promise::Idle)
+            {
+                self.canvas.status_message =
+                    Some((format!("Delete board failed: {msg}"), 5.0));
             }
         }
 
@@ -298,9 +358,19 @@ impl WorkspaceApp {
         {
             let mut lock = self.graph_promise.lock();
             if let Some(resp) = lock.take() {
+                let node_count = resp.nodes.len();
+                let edge_count = resp.edges.len();
                 self.graph.set_graph(resp.nodes, resp.edges);
                 self.graph_loaded = true;
-                self.graph.set_status("Graph loaded.");
+                if node_count == 0 {
+                    self.graph.set_status(
+                        "0 nodes — Graph uses LadybugDB, not sidebar notes. Set LADYBUG_DB_PATH, open Diag (Ladybug up), then Refresh.",
+                    );
+                } else {
+                    self.graph.set_status(format!(
+                        "Graph loaded ({node_count} nodes, {edge_count} edges)."
+                    ));
+                }
             } else if let api::Promise::Failed(msg) = std::mem::replace(&mut *lock, api::Promise::Idle) {
                 self.graph.set_status(format!("Graph load failed: {msg}"));
             }
@@ -351,7 +421,12 @@ impl eframe::App for WorkspaceApp {
             api::fetch_boards(self.boards_promise.clone(), ctx);
         }
 
-        self.poll_promises();
+        self.poll_promises(ctx);
+
+        if self.pending_boards_refresh {
+            self.pending_boards_refresh = false;
+            api::fetch_boards(self.boards_promise.clone(), ctx);
+        }
 
         self.editor.tick_status(dt);
         self.canvas.tick_status(dt);
@@ -385,6 +460,14 @@ impl eframe::App for WorkspaceApp {
                     let selected = self.app_view == view;
                     if ui.selectable_label(selected, label).clicked() {
                         self.app_view = view;
+                        if view == AppView::Canvas {
+                            canvas::sync_all_note_cards(&mut self.canvas, &self.notes);
+                            if self.current_board.is_none() && !self.boards.is_empty() {
+                                let board_id = self.boards[0].board_id.clone();
+                                self.sidebar.select_board(&board_id);
+                                self.load_board(&board_id, ctx);
+                            }
+                        }
                         if view == AppView::Graph && !self.graph_loaded {
                             self.load_graph(ctx);
                         }
@@ -413,6 +496,7 @@ impl eframe::App for WorkspaceApp {
 
         match self.app_view {
             AppView::Canvas => {
+                canvas::sync_all_note_cards(&mut self.canvas, &self.notes);
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let canvas_out = canvas::show(ui, &mut self.canvas);
                     self.handle_canvas_output(canvas_out, ctx);
@@ -591,6 +675,15 @@ impl WorkspaceApp {
         if let Some(title) = out.create_board_title {
             api::create_board("default", &title, self.board_create_promise.clone(), ctx);
         }
+        if let Some(board_id) = out.delete_board_id {
+            if self.current_board.as_ref().map(|b| &b.board_id) == Some(&board_id) {
+                self.canvas = CanvasState::new();
+                self.current_board = None;
+                self.app_view = AppView::Editor;
+            }
+            self.sidebar.deselect_board();
+            api::delete_board(&board_id, self.board_delete_promise.clone(), ctx);
+        }
     }
 
     fn handle_canvas_output(&mut self, out: CanvasOutput, ctx: &Context) {
@@ -629,6 +722,7 @@ impl WorkspaceApp {
                 .unwrap_or_default();
             api::save_board(
                 &board_id,
+                workspace_id,
                 &title,
                 &tldraw_value,
                 artifacts.objects,
@@ -639,6 +733,14 @@ impl WorkspaceApp {
             if let Some(ref mut board) = self.current_board {
                 board.tldraw_document = tldraw_value;
             }
+        }
+
+        if let Some(world_pos) = out.create_text_at {
+            canvas::add_text_card_at(&mut self.canvas, world_pos);
+        }
+
+        if out.delete_selection {
+            canvas::delete_selection_on_canvas(&mut self.canvas);
         }
 
         if let Some(world_pos) = out.create_note_at {

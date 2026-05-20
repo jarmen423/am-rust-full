@@ -12,6 +12,7 @@ pub const NOTE_CARD_WIDTH: f32 = 340.0;
 pub const NOTE_CARD_HEIGHT: f32 = 220.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CanvasCamera {
     pub x: f32,
     pub y: f32,
@@ -27,6 +28,7 @@ pub enum CanvasObjectKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CanvasObject {
     pub id: String,
     pub kind: CanvasObjectKind,
@@ -44,6 +46,7 @@ pub struct CanvasObject {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CanvasConnector {
     pub id: String,
     pub from_object_id: String,
@@ -55,6 +58,7 @@ pub struct CanvasConnector {
 /// Top-level canvas document stored inside `WorkspaceBoard.tldraw_document`.
 /// Keys use camelCase in JSON to match TypeScript output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceCanvasDocument {
     pub engine: String,
     pub version: i32,
@@ -102,22 +106,13 @@ pub fn create_empty_canvas_document() -> WorkspaceCanvasDocument {
     }
 }
 
-/// Strip frontmatter and markdown noise for card previews.
+/// Prepare note body markdown for canvas card preview (syntax preserved for rendering).
 pub fn build_markdown_preview(markdown: &str) -> String {
-    let text = strip_frontmatter(markdown);
-    let text = text
-        .replace("```", " code block ")
-        .chars()
-        .map(|c| match c {
-            '#' | '>' | '*' | '_' | '`' | '[' | ']' | '(' | ')' | '-' => ' ',
-            other => other,
-        })
-        .collect::<String>();
-    let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.len() > 180 {
-        format!("{}...", &text[..177])
-    } else if text.is_empty() {
+    let text = strip_frontmatter(markdown).trim().to_string();
+    if text.is_empty() {
         "No body yet.".to_string()
+    } else if text.len() > 800 {
+        format!("{}…", &text[..800])
     } else {
         text
     }
@@ -181,6 +176,36 @@ pub fn add_note_to_canvas_document(
         },
     );
 
+    WorkspaceCanvasDocument {
+        objects,
+        ..document.clone()
+    }
+}
+
+/// Place a standalone text card on the canvas (no backing note).
+pub fn add_text_card_to_canvas_document(
+    document: &WorkspaceCanvasDocument,
+    position: (f32, f32),
+) -> WorkspaceCanvasDocument {
+    let object_id = format!("canvas-text-{}", Utc::now().timestamp_millis());
+    let mut objects = document.objects.clone();
+    objects.insert(
+        object_id.clone(),
+        CanvasObject {
+            id: object_id,
+            kind: CanvasObjectKind::TextCard,
+            x: position.0,
+            y: position.1,
+            w: 280.0,
+            h: 120.0,
+            note_id: None,
+            title: "Text".to_string(),
+            summary: String::new(),
+            markdown_preview: "Double-click to edit in Notes after linking.".to_string(),
+            tags: vec!["canvas".to_string()],
+            locked: false,
+        },
+    );
     WorkspaceCanvasDocument {
         objects,
         ..document.clone()
@@ -291,6 +316,37 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_legacy_camel_case_canvas_object() {
+        let raw = r#"{
+            "engine": "agentic_canvas",
+            "version": 1,
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "objects": {
+                "card-1": {
+                    "id": "card-1",
+                    "kind": "note_card",
+                    "x": 160,
+                    "y": 160,
+                    "w": 340,
+                    "h": 220,
+                    "noteId": "note-abc",
+                    "title": "Smoke",
+                    "summary": "s",
+                    "markdownPreview": "preview",
+                    "tags": [],
+                    "locked": false
+                }
+            },
+            "connectors": {}
+        }"#;
+        let doc: WorkspaceCanvasDocument = serde_json::from_str(raw).expect("parse legacy board");
+        assert_eq!(doc.objects.len(), 1);
+        let obj = doc.objects.get("card-1").unwrap();
+        assert_eq!(obj.note_id.as_deref(), Some("note-abc"));
+        assert_eq!(obj.markdown_preview, "preview");
+    }
+
+    #[test]
     fn add_note_places_card_at_position() {
         let doc = create_empty_canvas_document();
         let note = sample_note();
@@ -372,10 +428,9 @@ mod tests {
     }
 
     #[test]
-    fn build_markdown_preview_strips_noise() {
+    fn build_markdown_preview_preserves_syntax() {
         let preview = build_markdown_preview("# Hello\n\n**world**");
-        assert!(preview.contains("Hello"));
-        assert!(preview.contains("world"));
-        assert!(!preview.contains('#'));
+        assert!(preview.contains("# Hello"));
+        assert!(preview.contains("**world**"));
     }
 }
